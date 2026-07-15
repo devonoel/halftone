@@ -1,5 +1,7 @@
+mod pipeline;
+
 use clap::{Args, Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(name = "halftone", about = "Turn images into ANSI/ASCII splash art")]
@@ -50,8 +52,25 @@ fn main() {
             eprintln!("not yet implemented");
         }
         Command::Convert { image_path, options } => {
-            eprintln!("convert: image_path={:?} width={} out={:?} mono={}", image_path, options.width, options.out, options.mono);
-            eprintln!("not yet implemented");
+            match pipeline::convert_image(&image_path, options.width, options.mono) {
+                Ok(art) => write_output(&art, options.out.as_deref()),
+                Err(err) => {
+                    eprintln!("failed to convert {}: {}", image_path.display(), err);
+                    std::process::exit(1);
+                }
+            }
         }
+    }
+}
+
+fn write_output(art: &str, out: Option<&Path>) {
+    match out {
+        Some(path) => {
+            if let Err(err) = std::fs::write(path, art) {
+                eprintln!("failed to write {}: {}", path.display(), err);
+                std::process::exit(1);
+            }
+        }
+        None => print!("{art}"),
     }
 }
