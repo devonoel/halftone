@@ -1,6 +1,7 @@
+mod openai;
 mod pipeline;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
@@ -18,6 +19,12 @@ enum Command {
         prompt: String,
         #[command(flatten)]
         options: ConvertOptions,
+        /// Aspect ratio of the generated image.
+        #[arg(long, value_enum, default_value = "square")]
+        size: ImageShape,
+        /// Also save the raw generated image (before ASCII conversion) to this path.
+        #[arg(long)]
+        save_image: Option<PathBuf>,
     },
     /// Convert an existing image file to ASCII art.
     Convert {
@@ -26,6 +33,25 @@ enum Command {
         #[command(flatten)]
         options: ConvertOptions,
     },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ImageShape {
+    Square,
+    Landscape,
+    Portrait,
+}
+
+impl ImageShape {
+    /// gpt-image-1 only accepts these three exact size strings (dall-e-3's
+    /// 1792x1024/1024x1792 no longer apply now that it's been shut down).
+    fn as_openai_size(self) -> &'static str {
+        match self {
+            ImageShape::Square => "1024x1024",
+            ImageShape::Landscape => "1536x1024",
+            ImageShape::Portrait => "1024x1536",
+        }
+    }
 }
 
 #[derive(Args)]
@@ -47,9 +73,30 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Generate { prompt, options } => {
-            eprintln!("generate: prompt={:?} width={} out={:?} mono={}", prompt, options.width, options.out, options.mono);
-            eprintln!("not yet implemented");
+        Command::Generate { prompt, options, size, save_image } => {
+            let bytes = match openai::generate_image(&prompt, size.as_openai_size()) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    eprintln!("{err}");
+                    std::process::exit(1);
+                }
+            };
+
+            if let Some(path) = &save_image {
+                match std::fs::write(path, &bytes) {
+                    Ok(()) => eprintln!("Saved raw image to {}", path.display()),
+                    Err(err) => eprintln!("failed to save generated image to {}: {}", path.display(), err),
+                }
+            }
+
+            eprintln!("Converting to ASCII art...");
+            match pipeline::convert_bytes(&bytes, options.width, options.mono) {
+                Ok(art) => write_output(&art, options.out.as_deref()),
+                Err(err) => {
+                    eprintln!("failed to convert generated image: {err}");
+                    std::process::exit(1);
+                }
+            }
         }
         Command::Convert { image_path, options } => {
             match pipeline::convert_image(&image_path, options.width, options.mono) {

@@ -1,4 +1,4 @@
-use image::{imageops::FilterType, GenericImageView};
+use image::{imageops::FilterType, DynamicImage, GenericImageView};
 use std::path::Path;
 
 // Light-to-dense glyph ramp. Terminals default to a dark background, so this
@@ -15,6 +15,15 @@ const CELL_ASPECT_RATIO: f64 = 2.0;
 
 pub fn convert_image(path: &Path, width: u32, mono: bool) -> Result<String, image::ImageError> {
     let img = image::open(path)?;
+    Ok(convert(&img, width, mono))
+}
+
+pub fn convert_bytes(bytes: &[u8], width: u32, mono: bool) -> Result<String, image::ImageError> {
+    let img = image::load_from_memory(bytes)?;
+    Ok(convert(&img, width, mono))
+}
+
+fn convert(img: &DynamicImage, width: u32, mono: bool) -> String {
     let (img_w, img_h) = img.dimensions();
 
     let height = ((width as f64) * (img_h as f64) / (img_w as f64) / CELL_ASPECT_RATIO)
@@ -123,5 +132,5 @@ pub fn convert_image(path: &Path, width: u32, mono: bool) -> Result<String, imag
         out.push('\n');
     }
 
-    Ok(out)
+    out
 }
