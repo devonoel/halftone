@@ -111,13 +111,11 @@ fn main() {
 }
 
 fn write_output(art: &str, out: Option<&Path>) {
-    match out {
-        Some(path) => {
-            if let Err(err) = std::fs::write(path, art) {
-                eprintln!("failed to write {}: {}", path.display(), err);
-                std::process::exit(1);
-            }
+    print!("{art}");
+    if let Some(path) = out {
+        if let Err(err) = std::fs::write(path, art) {
+            eprintln!("failed to write {}: {}", path.display(), err);
+            std::process::exit(1);
         }
-        None => print!("{art}"),
     }
 }
