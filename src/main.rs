@@ -67,6 +67,25 @@ struct ConvertOptions {
     /// Emit plain monochrome ASCII instead of ANSI color.
     #[arg(long)]
     mono: bool,
+
+    /// Background color for image (`--out foo.png`) exports, as a hex color
+    /// like `1e2b30` or `#1e2b30`. Has no effect on ANSI/text output, which
+    /// takes its background from the terminal it's viewed in.
+    #[arg(long, default_value = "000000")]
+    bg: String,
+}
+
+/// Parses a `RRGGBB` (optionally `#`-prefixed) hex color into its RGB bytes.
+fn parse_hex_color(s: &str) -> Result<[u8; 3], String> {
+    let hex = s.strip_prefix('#').unwrap_or(s);
+    if hex.len() != 6 {
+        return Err(format!("invalid color '{s}': expected 6 hex digits, like 1e2b30"));
+    }
+    let channel = |range| {
+        u8::from_str_radix(&hex[range], 16)
+            .map_err(|_| format!("invalid color '{s}': not valid hex"))
+    };
+    Ok([channel(0..2)?, channel(2..4)?, channel(4..6)?])
 }
 
 fn main() {
@@ -89,9 +108,14 @@ fn main() {
                 }
             }
 
+            let bg = parse_hex_color(&options.bg).unwrap_or_else(|err| {
+                eprintln!("{err}");
+                std::process::exit(1);
+            });
+
             eprintln!("Converting to ASCII art...");
-            match pipeline::convert_bytes(&bytes, options.width, options.mono) {
-                Ok(art) => write_output(&art, options.out.as_deref()),
+            match pipeline::convert_bytes(&bytes, options.width) {
+                Ok(grid) => write_output(&grid, options.mono, bg, options.out.as_deref()),
                 Err(err) => {
                     eprintln!("failed to convert generated image: {err}");
                     std::process::exit(1);
@@ -99,8 +123,13 @@ fn main() {
             }
         }
         Command::Convert { image_path, options } => {
-            match pipeline::convert_image(&image_path, options.width, options.mono) {
-                Ok(art) => write_output(&art, options.out.as_deref()),
+            let bg = parse_hex_color(&options.bg).unwrap_or_else(|err| {
+                eprintln!("{err}");
+                std::process::exit(1);
+            });
+
+            match pipeline::convert_image(&image_path, options.width) {
+                Ok(grid) => write_output(&grid, options.mono, bg, options.out.as_deref()),
                 Err(err) => {
                     eprintln!("failed to convert {}: {}", image_path.display(), err);
                     std::process::exit(1);
@@ -110,12 +139,32 @@ fn main() {
     }
 }
 
-fn write_output(art: &str, out: Option<&Path>) {
+/// Extensions recognized as "render this as a raster image" for `--out`.
+/// Anything else is treated as a text destination for the ANSI/ASCII art.
+fn is_image_path(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_ascii_lowercase())
+            .as_deref(),
+        Some("png") | Some("jpg") | Some("jpeg") | Some("bmp") | Some("tiff") | Some("webp")
+    )
+}
+
+fn write_output(grid: &pipeline::Grid, mono: bool, bg: [u8; 3], out: Option<&Path>) {
+    let art = pipeline::render_ansi(grid, mono);
     print!("{art}");
-    if let Some(path) = out {
-        if let Err(err) = std::fs::write(path, art) {
+
+    let Some(path) = out else { return };
+
+    if is_image_path(path) {
+        let image = pipeline::render_image(grid, mono, bg);
+        if let Err(err) = image.save(path) {
             eprintln!("failed to write {}: {}", path.display(), err);
             std::process::exit(1);
         }
+    } else if let Err(err) = std::fs::write(path, &art) {
+        eprintln!("failed to write {}: {}", path.display(), err);
+        std::process::exit(1);
     }
 }

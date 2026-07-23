@@ -24,6 +24,9 @@ also generate the source image for you from a text prompt via OpenAI's
 - **Text-to-art generation** — skip the source image entirely and describe
   what you want; `halftone generate` calls OpenAI's image API and pipes the
   result straight into the same conversion pipeline.
+- **PNG/JPG export** — save the art as an actual raster image (rendered with
+  a bundled monospace font) instead of just a text/ANSI dump, so it's easy
+  to share somewhere that doesn't render terminal escape codes.
 
 ## Install
 
@@ -61,6 +64,15 @@ Available on both `convert` and `generate`:
 | `--width <N>`     | Output width in characters                        | `80`    |
 | `--out <path>`    | Write output to a file (also prints to stdout)     | —       |
 | `--mono`          | Emit plain grayscale ASCII instead of ANSI color   | off     |
+| `--bg <hex>`      | Background color for image exports, e.g. `1e2b30` | `000000` |
+
+`--out` accepts either a text path (`.txt`, `.ansi`, or anything else) to
+save the raw ANSI/ASCII text, or an image path (`.png`, `.jpg`/`.jpeg`,
+`.bmp`, `.tiff`, `.webp`) to save a rasterized image of the art instead —
+the format is picked automatically from the extension. Either way, the
+colored/mono art is still printed to stdout. `--bg` only affects image
+exports — text/ANSI output has no background of its own, it just takes on
+whatever your terminal is set to.
 
 `generate` only:
 
@@ -84,9 +96,16 @@ Available on both `convert` and `generate`:
    ramp) actually offers.
 4. Unless `--mono` is set, each glyph is wrapped in a 24-bit ANSI color
    escape using that cell's sampled RGB.
+5. If `--out` points at an image file, the same glyph grid is instead
+   rasterized onto a canvas using a bundled copy of JetBrains Mono, one
+   fixed-size cell per glyph, rather than being formatted as ANSI text.
 
 ## Requirements
 
 - `OPENAI_API_KEY` environment variable, only for `generate`.
 - A true-color-capable terminal to see ANSI output as intended (most modern
   terminal emulators qualify).
+
+PNG/JPG export bundles [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono)
+(SIL Open Font License 1.1, see `assets/JetBrainsMono-OFL.txt`) so image
+output doesn't depend on fonts installed on the machine running the binary.

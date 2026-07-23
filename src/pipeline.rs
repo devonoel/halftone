@@ -1,4 +1,6 @@
-use image::{imageops::FilterType, DynamicImage, GenericImageView};
+use ab_glyph::{FontRef, PxScale};
+use image::{imageops::FilterType, DynamicImage, GenericImageView, Rgb, RgbImage};
+use imageproc::drawing::draw_text_mut;
 use std::path::Path;
 
 // Light-to-dense glyph ramp. Terminals default to a dark background, so this
@@ -13,17 +15,38 @@ const RAMP: &[u8] = b" .:-=+*#%@";
 // correction eyesore's vision code applies to circular field-of-view.
 const CELL_ASPECT_RATIO: f64 = 2.0;
 
-pub fn convert_image(path: &Path, width: u32, mono: bool) -> Result<String, image::ImageError> {
+// JetBrains Mono, bundled under the SIL OFL 1.1 (see assets/JetBrainsMono-OFL.txt),
+// so `--out foo.png` doesn't depend on whatever fonts happen to be on the
+// machine building or running the binary.
+const FONT_BYTES: &[u8] = include_bytes!("../assets/JetBrainsMono-Regular.ttf");
+
+// Pixel size of one character cell when rasterizing to an image. Kept at the
+// same 2:1 height:width ratio as CELL_ASPECT_RATIO above, for the same reason.
+const CELL_PIXEL_WIDTH: u32 = 10;
+const CELL_PIXEL_HEIGHT: u32 = 20;
+
+pub struct Cell {
+    pub glyph: char,
+    pub color: [u8; 3],
+}
+
+pub struct Grid {
+    pub width: u32,
+    pub height: u32,
+    pub cells: Vec<Cell>,
+}
+
+pub fn convert_image(path: &Path, width: u32) -> Result<Grid, image::ImageError> {
     let img = image::open(path)?;
-    Ok(convert(&img, width, mono))
+    Ok(build_grid(&img, width))
 }
 
-pub fn convert_bytes(bytes: &[u8], width: u32, mono: bool) -> Result<String, image::ImageError> {
+pub fn convert_bytes(bytes: &[u8], width: u32) -> Result<Grid, image::ImageError> {
     let img = image::load_from_memory(bytes)?;
-    Ok(convert(&img, width, mono))
+    Ok(build_grid(&img, width))
 }
 
-fn convert(img: &DynamicImage, width: u32, mono: bool) -> String {
+fn build_grid(img: &DynamicImage, width: u32) -> Grid {
     let (img_w, img_h) = img.dimensions();
 
     let height = ((width as f64) * (img_h as f64) / (img_w as f64) / CELL_ASPECT_RATIO)
@@ -88,28 +111,18 @@ fn convert(img: &DynamicImage, width: u32, mono: bool) -> String {
     // rounding error into its not-yet-visited neighbors is the classic
     // halftone-printing trick for faking more tones than you actually have
     // ink levels for.
-    let mut out = String::with_capacity((width as usize + 1) * height as usize);
+    let mut cells = Vec::with_capacity((width * height) as usize);
     for y in 0..height {
         for x in 0..width {
             let i = (y * width + x) as usize;
             let value = levels[i];
             let idx = value.round().clamp(0.0, max_level) as usize;
             let glyph = RAMP[idx] as char;
-
-            // Brightness alone can't tell apart regions that differ in hue
-            // but not luminance (green skin vs. tan leather vs. brown wood,
-            // say) -- coloring each glyph with its cell's actual sampled
-            // color recovers exactly that information instead of throwing
-            // it away in the grayscale conversion above.
-            if mono {
-                out.push(glyph);
-            } else {
-                let pixel = rgb.get_pixel(x, y);
-                out.push_str(&format!(
-                    "\x1b[38;2;{};{};{}m{glyph}",
-                    pixel[0], pixel[1], pixel[2]
-                ));
-            }
+            let pixel = rgb.get_pixel(x, y);
+            cells.push(Cell {
+                glyph,
+                color: [pixel[0], pixel[1], pixel[2]],
+            });
 
             let error = value - idx as f64;
             if x + 1 < width {
@@ -126,11 +139,64 @@ fn convert(img: &DynamicImage, width: u32, mono: bool) -> String {
                 }
             }
         }
+    }
+
+    Grid { width, height, cells }
+}
+
+pub fn render_ansi(grid: &Grid, mono: bool) -> String {
+    let mut out = String::with_capacity((grid.width as usize + 1) * grid.height as usize);
+    for y in 0..grid.height {
+        for x in 0..grid.width {
+            let cell = &grid.cells[(y * grid.width + x) as usize];
+            if mono {
+                out.push(cell.glyph);
+            } else {
+                let [r, g, b] = cell.color;
+                out.push_str(&format!("\x1b[38;2;{r};{g};{b}m{}", cell.glyph));
+            }
+        }
         if !mono {
             out.push_str("\x1b[0m");
         }
         out.push('\n');
     }
-
     out
+}
+
+// Renders the same glyph grid to a raster image, so ASCII/ANSI art can be
+// shared as a PNG/JPG rather than just pasted as text. Cell positions are
+// placed directly from grid coordinates instead of running the font's own
+// text layout, since we want a fixed-size monospace grid regardless of this
+// particular font's own advance-width metrics.
+pub fn render_image(grid: &Grid, mono: bool, bg: [u8; 3]) -> RgbImage {
+    let font = FontRef::try_from_slice(FONT_BYTES).expect("bundled font is valid");
+    let scale = PxScale::from(CELL_PIXEL_HEIGHT as f32);
+
+    let img_width = grid.width * CELL_PIXEL_WIDTH;
+    let img_height = grid.height * CELL_PIXEL_HEIGHT;
+    let mut canvas = RgbImage::from_pixel(img_width, img_height, Rgb(bg));
+
+    for y in 0..grid.height {
+        for x in 0..grid.width {
+            let cell = &grid.cells[(y * grid.width + x) as usize];
+            if cell.glyph == ' ' {
+                continue;
+            }
+            let color = if mono { Rgb([255, 255, 255]) } else { Rgb(cell.color) };
+            let mut buf = [0u8; 4];
+            let glyph_str = cell.glyph.encode_utf8(&mut buf);
+            draw_text_mut(
+                &mut canvas,
+                color,
+                (x * CELL_PIXEL_WIDTH) as i32,
+                (y * CELL_PIXEL_HEIGHT) as i32,
+                scale,
+                &font,
+                glyph_str,
+            );
+        }
+    }
+
+    canvas
 }
