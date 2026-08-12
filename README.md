@@ -35,7 +35,7 @@ also generate the source image for you from a text prompt via OpenAI's
 Requires a [Rust toolchain](https://rustup.rs/).
 
 ```sh
-git clone <this-repo>
+git clone https://github.com/devonoel/halftone.git
 cd halftone
 cargo build --release
 ```
