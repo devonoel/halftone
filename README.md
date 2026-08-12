@@ -8,6 +8,8 @@ preserve detail that naive brightness-to-glyph mapping throws away. It can
 also generate the source image for you from a text prompt via OpenAI's
 `gpt-image-1`, so you can go from an idea to terminal art in one command.
 
+![Example output of halftone converting a painting of a bartender into colored ASCII art](docs/example.png)
+
 ## Features
 
 - **Detail-preserving conversion** — histogram equalization spreads out
@@ -109,3 +111,8 @@ whatever your terminal is set to.
 PNG/JPG export bundles [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono)
 (SIL Open Font License 1.1, see `assets/JetBrainsMono-OFL.txt`) so image
 output doesn't depend on fonts installed on the machine running the binary.
+
+## License
+
+Licensed under either of [MIT](LICENSE-MIT) or [Apache License, Version
+2.0](LICENSE-APACHE) at your option.

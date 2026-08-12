@@ -1,5 +1,5 @@
 use ab_glyph::{FontRef, PxScale};
-use image::{imageops::FilterType, DynamicImage, GenericImageView, Rgb, RgbImage};
+use image::{DynamicImage, GenericImageView, Rgb, RgbImage, imageops::FilterType};
 use imageproc::drawing::draw_text_mut;
 use std::path::Path;
 
@@ -141,7 +141,11 @@ fn build_grid(img: &DynamicImage, width: u32) -> Grid {
         }
     }
 
-    Grid { width, height, cells }
+    Grid {
+        width,
+        height,
+        cells,
+    }
 }
 
 pub fn render_ansi(grid: &Grid, mono: bool) -> String {
@@ -183,7 +187,11 @@ pub fn render_image(grid: &Grid, mono: bool, bg: [u8; 3]) -> RgbImage {
             if cell.glyph == ' ' {
                 continue;
             }
-            let color = if mono { Rgb([255, 255, 255]) } else { Rgb(cell.color) };
+            let color = if mono {
+                Rgb([255, 255, 255])
+            } else {
+                Rgb(cell.color)
+            };
             let mut buf = [0u8; 4];
             let glyph_str = cell.glyph.encode_utf8(&mut buf);
             draw_text_mut(

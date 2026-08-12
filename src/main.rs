@@ -79,7 +79,9 @@ struct ConvertOptions {
 fn parse_hex_color(s: &str) -> Result<[u8; 3], String> {
     let hex = s.strip_prefix('#').unwrap_or(s);
     if hex.len() != 6 {
-        return Err(format!("invalid color '{s}': expected 6 hex digits, like 1e2b30"));
+        return Err(format!(
+            "invalid color '{s}': expected 6 hex digits, like 1e2b30"
+        ));
     }
     let channel = |range| {
         u8::from_str_radix(&hex[range], 16)
@@ -92,7 +94,12 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Generate { prompt, options, size, save_image } => {
+        Command::Generate {
+            prompt,
+            options,
+            size,
+            save_image,
+        } => {
             let bytes = match openai::generate_image(&prompt, size.as_openai_size()) {
                 Ok(bytes) => bytes,
                 Err(err) => {
@@ -104,7 +111,11 @@ fn main() {
             if let Some(path) = &save_image {
                 match std::fs::write(path, &bytes) {
                     Ok(()) => eprintln!("Saved raw image to {}", path.display()),
-                    Err(err) => eprintln!("failed to save generated image to {}: {}", path.display(), err),
+                    Err(err) => eprintln!(
+                        "failed to save generated image to {}: {}",
+                        path.display(),
+                        err
+                    ),
                 }
             }
 
@@ -122,7 +133,10 @@ fn main() {
                 }
             }
         }
-        Command::Convert { image_path, options } => {
+        Command::Convert {
+            image_path,
+            options,
+        } => {
             let bg = parse_hex_color(&options.bg).unwrap_or_else(|err| {
                 eprintln!("{err}");
                 std::process::exit(1);

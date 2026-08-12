@@ -3,3 +3,4 @@
 *.jpg
 *.ansi
 .DS_Store
+!docs/*.png

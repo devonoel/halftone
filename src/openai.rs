@@ -61,7 +61,9 @@ pub fn generate_image(prompt: &str, size: &str) -> Result<Vec<u8>, String> {
         .build()
         .map_err(|err| format!("failed to build HTTP client: {}", describe_error(&err)))?;
 
-    eprintln!("Requesting image from OpenAI (gpt-image-1, size {size})... this can take up to a minute or so.");
+    eprintln!(
+        "Requesting image from OpenAI (gpt-image-1, size {size})... this can take up to a minute or so."
+    );
     let response = client
         .post(API_URL)
         .bearer_auth(&api_key)
@@ -98,7 +100,12 @@ pub fn generate_image(prompt: &str, size: &str) -> Result<Vec<u8>, String> {
         let bytes = client
             .get(&url)
             .send()
-            .map_err(|err| format!("failed to download generated image: {}", describe_error(&err)))?
+            .map_err(|err| {
+                format!(
+                    "failed to download generated image: {}",
+                    describe_error(&err)
+                )
+            })?
             .bytes()
             .map_err(|err| format!("failed to read downloaded image: {}", describe_error(&err)))?;
         return Ok(bytes.to_vec());
