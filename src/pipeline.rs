@@ -168,6 +168,37 @@ pub fn render_ansi(grid: &Grid, mono: bool) -> String {
     out
 }
 
+// Target luminance (out of 255) for an auto-computed background. Dark enough
+// that bright glyphs still read clearly against it, but far off pure black so
+// a warm/cool source image still reads as warm/cool rather than neutral.
+const AUTO_BG_LUMINANCE: f64 = 28.0;
+
+/// Derives a dark background color tinted toward the image's own average
+/// color (its overall "temperature"), instead of defaulting to flat black
+/// regardless of source. The average hue/saturation is preserved and just
+/// scaled down to a dark target luminance.
+pub fn auto_background(grid: &Grid) -> [u8; 3] {
+    let n = grid.cells.len() as f64;
+    let (mut r, mut g, mut b) = (0f64, 0f64, 0f64);
+    for cell in &grid.cells {
+        r += cell.color[0] as f64;
+        g += cell.color[1] as f64;
+        b += cell.color[2] as f64;
+    }
+    r /= n;
+    g /= n;
+    b /= n;
+
+    let luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    if luminance <= 0.0 {
+        return [0, 0, 0];
+    }
+
+    let scale = AUTO_BG_LUMINANCE / luminance;
+    let channel = |v: f64| (v * scale).round().clamp(0.0, 255.0) as u8;
+    [channel(r), channel(g), channel(b)]
+}
+
 // Renders the same glyph grid to a raster image, so ASCII/ANSI art can be
 // shared as a PNG/JPG rather than just pasted as text. Cell positions are
 // placed directly from grid coordinates instead of running the font's own

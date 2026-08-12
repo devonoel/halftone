@@ -66,7 +66,7 @@ Available on both `convert` and `generate`:
 | `--width <N>`     | Output width in characters                        | `80`    |
 | `--out <path>`    | Write output to a file (also prints to stdout)     | —       |
 | `--mono`          | Emit plain grayscale ASCII instead of ANSI color   | off     |
-| `--bg <hex>`      | Background color for image exports, e.g. `1e2b30` | `000000` |
+| `--bg <auto\|hex>` | Background color for image exports                | `auto`  |
 
 `--out` accepts either a text path (`.txt`, `.ansi`, or anything else) to
 save the raw ANSI/ASCII text, or an image path (`.png`, `.jpg`/`.jpeg`,
@@ -74,7 +74,10 @@ save the raw ANSI/ASCII text, or an image path (`.png`, `.jpg`/`.jpeg`,
 the format is picked automatically from the extension. Either way, the
 colored/mono art is still printed to stdout. `--bg` only affects image
 exports — text/ANSI output has no background of its own, it just takes on
-whatever your terminal is set to.
+whatever your terminal is set to. By default (`auto`) the background is
+derived from the source image's own average color, darkened, so the export
+reads as a natural dark theme tinted to the image rather than flat black.
+Pass a hex color like `--bg 1e2b30` to pick one explicitly.
 
 `generate` only:
 
