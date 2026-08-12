@@ -1,5 +1,7 @@
 # halftone
 
+[![crates.io](https://img.shields.io/crates/v/halftone.svg)](https://crates.io/crates/halftone)
+
 Turn images into ANSI/ASCII art, right in your terminal.
 
 `halftone` converts any image to a colored (or monochrome) character-art
@@ -33,6 +35,12 @@ also generate the source image for you from a text prompt via OpenAI's
 ## Install
 
 Requires a [Rust toolchain](https://rustup.rs/).
+
+```sh
+cargo install halftone
+```
+
+Or build from source:
 
 ```sh
 git clone https://github.com/devonoel/halftone.git
