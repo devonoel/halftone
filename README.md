@@ -65,6 +65,13 @@ export OPENAI_API_KEY=sk-...
 halftone generate "a neon-lit alley cat in the rain" --size landscape
 ```
 
+### Generate a batch of variations from one prompt
+
+```sh
+halftone generate "a neon-lit alley cat in the rain" --count 4 --out cat.png
+# -> cat-1.png, cat-2.png, cat-3.png, cat-4.png
+```
+
 ### Options
 
 Available on both `convert` and `generate`:
@@ -93,6 +100,19 @@ Pass a hex color like `--bg 1e2b30` to pick one explicitly.
 | --------------------- | ---------------------------------------------------------- | -------- |
 | `--size <shape>`       | `square` (1024x1024), `landscape` (1536x1024), or `portrait` (1024x1536) | `square` |
 | `--save-image <path>`  | Also save the raw generated image, before conversion       | —        |
+| `-n, --count <N>`      | Generate this many images from the same prompt (1-10)      | `1`      |
+
+`--count` asks OpenAI for all `N` images in a single request rather than
+making `N` separate calls. When `--count` is greater than 1, `--out` and
+`--save-image` each get a `-1`, `-2`, ... suffix inserted before their
+extension (`art.png` → `art-1.png`, `art-2.png`, ...) so every image in the
+batch lands at its own path instead of the last one overwriting the rest.
+
+OpenAI caps how many images an account can request per minute, and that cap
+varies by account/usage tier -- if `--count` asks for more than yours
+allows, halftone automatically retries in smaller batches (and waits a bit
+between requests if the account's per-minute window needs to refill),
+rather than failing the whole command.
 
 ## How it works
 

@@ -22,7 +22,7 @@ const CELL_ASPECT_RATIO: f64 = 2.0;
 // practice this alone is a weak lever for ordinary photos -- most of their
 // darker/midtone pixels are also fairly low-saturation to begin with, so
 // brightening them just yields brighter gray, not more visible color.
-const COLOR_GAMMA: f64 = 2.0;
+const COLOR_GAMMA: f64 = 1.4;
 
 // Multiplies each cell's saturation (clamped back to 1.0). This is the lever
 // that actually reads as "less muddy" at a glance: an ordinary photo's
@@ -262,12 +262,22 @@ pub fn render_ansi(grid: &Grid, mono: bool) -> String {
 // Target luminance (out of 255) for an auto-computed background. Dark enough
 // that bright glyphs still read clearly against it, but far off pure black so
 // a warm/cool source image still reads as warm/cool rather than neutral.
-const AUTO_BG_LUMINANCE: f64 = 55.0;
+const AUTO_BG_LUMINANCE: f64 = 34.0;
+
+// How much of the image's average color to keep when tinting the background,
+// from 0 (flat neutral gray) to 1 (the average color at full strength, the
+// old behavior). A strongly single-hued source (a red sunset, a green
+// jungle) averages to a fully-saturated color in that same hue -- rendered
+// at full strength behind glyphs that are largely that same hue, the
+// background stops reading as a backdrop and starts competing with the
+// artwork for the same color, muddying the whole image even though its
+// luminance is correctly dark. Muting the tint keeps a hint of "warm" or
+// "cool" without giving the background enough saturation to compete.
+const AUTO_BG_TINT: f64 = 0.25;
 
 /// Derives a dark background color tinted toward the image's own average
 /// color (its overall "temperature"), instead of defaulting to flat black
-/// regardless of source. The average hue/saturation is preserved and just
-/// scaled down to a dark target luminance.
+/// regardless of source.
 pub fn auto_background(grid: &Grid) -> [u8; 3] {
     let n = grid.cells.len() as f64;
     let (mut r, mut g, mut b) = (0f64, 0f64, 0f64);
@@ -284,6 +294,14 @@ pub fn auto_background(grid: &Grid) -> [u8; 3] {
     if luminance <= 0.0 {
         return [0, 0, 0];
     }
+
+    // Blend each channel toward this same luminance's neutral gray. The
+    // gray's weighted sum is `luminance` by construction, so this blend
+    // leaves the overall luminance unchanged -- only saturation drops --
+    // and the scale step below still lands exactly on AUTO_BG_LUMINANCE.
+    let r = luminance + (r - luminance) * AUTO_BG_TINT;
+    let g = luminance + (g - luminance) * AUTO_BG_TINT;
+    let b = luminance + (b - luminance) * AUTO_BG_TINT;
 
     let scale = AUTO_BG_LUMINANCE / luminance;
     let channel = |v: f64| (v * scale).round().clamp(0.0, 255.0) as u8;

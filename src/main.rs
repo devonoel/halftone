@@ -5,7 +5,11 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
-#[command(name = "halftone", about = "Turn images into ANSI/ASCII splash art")]
+#[command(
+    name = "halftone",
+    about = "Turn images into ANSI/ASCII splash art",
+    version
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -25,6 +29,12 @@ enum Command {
         /// Also save the raw generated image (before ASCII conversion) to this path.
         #[arg(long)]
         save_image: Option<PathBuf>,
+        /// Generate this many images from the same prompt in one request.
+        /// When more than 1, `--out`/`--save-image` paths get a `-1`, `-2`,
+        /// ... suffix inserted before the extension so each image lands at
+        /// its own path instead of overwriting the last one.
+        #[arg(short = 'n', long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=10))]
+        count: u32,
     },
     /// Convert an existing image file to ASCII art.
     Convert {
@@ -106,32 +116,44 @@ fn main() {
             options,
             size,
             save_image,
+            count,
         } => {
-            let bytes = match openai::generate_image(&prompt, size.as_openai_size()) {
-                Ok(bytes) => bytes,
+            let images = match openai::generate_images(&prompt, size.as_openai_size(), count) {
+                Ok(images) => images,
                 Err(err) => {
                     eprintln!("{err}");
                     std::process::exit(1);
                 }
             };
+            let total = images.len();
 
-            if let Some(path) = &save_image {
-                match std::fs::write(path, &bytes) {
-                    Ok(()) => eprintln!("Saved raw image to {}", path.display()),
-                    Err(err) => eprintln!(
-                        "failed to save generated image to {}: {}",
-                        path.display(),
-                        err
-                    ),
+            for (i, bytes) in images.into_iter().enumerate() {
+                if total > 1 {
+                    eprintln!("--- Image {} of {total} ---", i + 1);
                 }
-            }
 
-            eprintln!("Converting to ASCII art...");
-            match pipeline::convert_bytes(&bytes, options.width) {
-                Ok(grid) => write_output(&grid, options.mono, &options.bg, options.out.as_deref()),
-                Err(err) => {
-                    eprintln!("failed to convert generated image: {err}");
-                    std::process::exit(1);
+                if let Some(path) = &save_image {
+                    let path = indexed_path(path, i, total);
+                    match std::fs::write(&path, &bytes) {
+                        Ok(()) => eprintln!("Saved raw image to {}", path.display()),
+                        Err(err) => eprintln!(
+                            "failed to save generated image to {}: {}",
+                            path.display(),
+                            err
+                        ),
+                    }
+                }
+
+                eprintln!("Converting to ASCII art...");
+                match pipeline::convert_bytes(&bytes, options.width) {
+                    Ok(grid) => {
+                        let out = options.out.as_deref().map(|p| indexed_path(p, i, total));
+                        write_output(&grid, options.mono, &options.bg, out.as_deref())
+                    }
+                    Err(err) => {
+                        eprintln!("failed to convert generated image: {err}");
+                        std::process::exit(1);
+                    }
                 }
             }
         }
@@ -146,6 +168,27 @@ fn main() {
             }
         },
     }
+}
+
+/// Inserts a `-{n}` (1-based) suffix before `path`'s extension so a batch of
+/// `--count` images each get their own file instead of every image after the
+/// first overwriting the last. A single-image run (`total <= 1`) returns
+/// `path` unchanged, preserving today's filenames for existing scripts.
+fn indexed_path(path: &Path, index: usize, total: usize) -> PathBuf {
+    if total <= 1 {
+        return path.to_path_buf();
+    }
+
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("output");
+    let mut name = format!("{stem}-{}", index + 1);
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        name.push('.');
+        name.push_str(ext);
+    }
+    path.with_file_name(name)
 }
 
 /// Extensions recognized as "render this as a raster image" for `--out`.
