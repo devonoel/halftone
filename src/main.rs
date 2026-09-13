@@ -79,32 +79,80 @@ struct ConvertOptions {
     mono: bool,
 
     /// Background color for image (`--out foo.png`) exports: `auto` to derive
-    /// a dark background tinted toward the image's own average color, or a
-    /// hex color like `1e2b30` / `#1e2b30`. Has no effect on ANSI/text
-    /// output, which takes its background from the terminal it's viewed in.
+    /// a dark background tinted toward the image's own average color, a hex
+    /// color like `1e2b30` / `#1e2b30`, or `transparent` to leave everything
+    /// but the glyphs transparent. Append `@<0-255>` to `auto` or a hex color
+    /// (e.g. `auto@128`, `1e2b30@80`) for a semi-transparent tinted
+    /// background instead of fully opaque or fully invisible -- a backdrop
+    /// still shows through for contrast, without hiding whatever the art
+    /// gets composited onto. Anything other than full opacity is PNG output
+    /// only. Has no effect on ANSI/text output, which takes its background
+    /// from the terminal it's viewed in.
     #[arg(long, default_value = "auto")]
     bg: String,
 }
 
-/// Resolves the `--bg` value against a converted grid: `auto` derives a
-/// background from the grid's own average color, anything else is parsed as
-/// a `RRGGBB` (optionally `#`-prefixed) hex color.
-fn resolve_bg(bg: &str, grid: &pipeline::Grid) -> Result<[u8; 3], String> {
-    if bg.eq_ignore_ascii_case("auto") {
-        return Ok(pipeline::auto_background(grid));
+/// Resolves the `--bg` value against a converted grid. The color part is
+/// `auto` (derived from the grid's own average color) or a `RRGGBB`
+/// (optionally `#`-prefixed) hex color; `transparent` is shorthand for that
+/// color at zero opacity. An optional `@<0-255>` suffix on `auto`/hex picks
+/// the opacity directly, so a background can sit anywhere between fully
+/// opaque and fully invisible instead of only those two extremes.
+fn resolve_bg(bg: &str, grid: &pipeline::Grid) -> Result<pipeline::Background, String> {
+    if bg.eq_ignore_ascii_case("transparent") {
+        return Ok(pipeline::Background::Translucent {
+            color: [0, 0, 0],
+            alpha: 0,
+        });
     }
 
-    let hex = bg.strip_prefix('#').unwrap_or(bg);
-    if hex.len() != 6 {
-        return Err(format!(
-            "invalid color '{bg}': expected 'auto' or 6 hex digits, like 1e2b30"
-        ));
-    }
-    let channel = |range| {
-        u8::from_str_radix(&hex[range], 16)
-            .map_err(|_| format!("invalid color '{bg}': not valid hex"))
+    let (spec, alpha) = match bg.split_once('@') {
+        Some((spec, alpha_str)) => {
+            let alpha: u8 = alpha_str.parse().map_err(|_| {
+                format!("invalid alpha '{alpha_str}' in '{bg}': expected a number from 0-255")
+            })?;
+            (spec, alpha)
+        }
+        None => (bg, 255),
     };
-    Ok([channel(0..2)?, channel(2..4)?, channel(4..6)?])
+
+    let color = if spec.eq_ignore_ascii_case("auto") {
+        pipeline::auto_background(grid)
+    } else {
+        let hex = spec.strip_prefix('#').unwrap_or(spec);
+        if hex.len() != 6 {
+            return Err(format!(
+                "invalid color '{spec}': expected 'auto', 'transparent', or 6 hex digits, like 1e2b30"
+            ));
+        }
+        let channel = |range| {
+            u8::from_str_radix(&hex[range], 16)
+                .map_err(|_| format!("invalid color '{spec}': not valid hex"))
+        };
+        [channel(0..2)?, channel(2..4)?, channel(4..6)?]
+    };
+
+    if alpha == 255 {
+        Ok(pipeline::Background::Opaque(color))
+    } else {
+        Ok(pipeline::Background::Translucent { color, alpha })
+    }
+}
+
+/// Whether `path`'s extension supports an alpha channel, for gating any
+/// non-fully-opaque `--bg`. Only PNG among today's `is_image_path` formats
+/// does in the way this tool writes files -- JPEG has no alpha at all, and
+/// BMP/TIFF support from the `image` crate's encoders isn't guaranteed here,
+/// so transparency sticks to the one format guaranteed to round-trip it
+/// correctly rather than silently flattening to black/white on the others.
+fn supports_alpha(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_ascii_lowercase())
+            .as_deref(),
+        Some("png")
+    )
 }
 
 fn main() {
@@ -214,6 +262,13 @@ fn write_output(grid: &pipeline::Grid, mono: bool, bg: &str, out: Option<&Path>)
             eprintln!("{err}");
             std::process::exit(1);
         });
+        if matches!(bg, pipeline::Background::Translucent { .. }) && !supports_alpha(path) {
+            eprintln!(
+                "a non-opaque `--bg` needs an alpha channel, which {} doesn't support here -- use a `.png` path instead.",
+                path.display()
+            );
+            std::process::exit(1);
+        }
         let image = pipeline::render_image(grid, mono, bg);
         if let Err(err) = image.save(path) {
             eprintln!("failed to write {}: {}", path.display(), err);

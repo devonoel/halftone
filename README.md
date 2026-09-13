@@ -81,7 +81,7 @@ Available on both `convert` and `generate`:
 | `--width <N>`     | Output width in characters                        | `80`    |
 | `--out <path>`    | Write output to a file (also prints to stdout)     | —       |
 | `--mono`          | Emit plain grayscale ASCII instead of ANSI color   | off     |
-| `--bg <auto\|hex>` | Background color for image exports                | `auto`  |
+| `--bg <spec>`     | Background color for image exports                | `auto`  |
 
 `--out` accepts either a text path (`.txt`, `.ansi`, or anything else) to
 save the raw ANSI/ASCII text, or an image path (`.png`, `.jpg`/`.jpeg`,
@@ -93,6 +93,26 @@ whatever your terminal is set to. By default (`auto`) the background is
 derived from the source image's own average color, darkened, so the export
 reads as a natural dark theme tinted to the image rather than flat black.
 Pass a hex color like `--bg 1e2b30` to pick one explicitly.
+
+`--bg` also accepts:
+
+- `transparent` — drop the background entirely, so only the glyphs
+  themselves are opaque. Useful for compositing the art over a slide, web
+  page, or another image. PNG output only (`.jpg`/`.bmp`/`.tiff` have no
+  alpha channel to hold it, and are rejected with an error rather than
+  silently flattening to black).
+- `<auto|hex>@<0-255>` — a semi-transparent tinted background, e.g.
+  `auto@128` or `1e2b30@80`. A backdrop still shows through at the given
+  opacity for contrast, without hiding whatever the art gets composited
+  onto. Also PNG output only.
+
+Note that the color pipeline (equalization, saturation, the tuned background)
+is built around dark backgrounds and colorful source images — glyph colors
+are chosen to read well against a dark backdrop specifically, so
+`transparent`/translucent exports composited onto a light background may
+look washed out or low-contrast. There's no great fix for this today short
+of `--mono`; it's a known limitation of exporting colored glyphs without a
+guaranteed backdrop.
 
 `generate` only:
 

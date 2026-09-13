@@ -1,5 +1,5 @@
 use ab_glyph::{FontRef, PxScale};
-use image::{DynamicImage, GenericImageView, Rgb, RgbImage, imageops::FilterType};
+use image::{DynamicImage, GenericImageView, Rgb, RgbImage, Rgba, RgbaImage, imageops::FilterType};
 use imageproc::drawing::draw_text_mut;
 use std::path::Path;
 
@@ -24,12 +24,24 @@ const CELL_ASPECT_RATIO: f64 = 2.0;
 // brightening them just yields brighter gray, not more visible color.
 const COLOR_GAMMA: f64 = 1.4;
 
-// Multiplies each cell's saturation (clamped back to 1.0). This is the lever
-// that actually reads as "less muddy" at a glance: an ordinary photo's
-// midtones are rarely far from gray, so pushing their (small) existing hue
-// difference harder is what makes the render look like it has color in it,
-// far more than adjusting brightness does on its own.
-const SATURATION_BOOST: f64 = 3.0;
+// Exponent applied to each cell's saturation (`saturation.powf(SATURATION_GAMMA)`,
+// so < 1 lifts it). This is the lever that actually reads as "less muddy" at
+// a glance: an ordinary photo's midtones are rarely far from gray, so
+// pushing their (small) existing hue difference harder is what makes the
+// render look like it has color in it, far more than adjusting brightness
+// does on its own.
+//
+// A flat multiplier (the original approach here) does that fine for genuinely
+// gray midtones, but clamping at 1.0 means it also flattens every already
+// moderately-saturated color (a warm-toned "white" sand dune at ~0.4-0.56,
+// say) up to full saturation alongside actually-vivid colors (a fiery sky at
+// ~0.8-0.9) -- the two become visually indistinguishable, and the sand loses
+// the paler, brighter quality that made it read as sand rather than solid
+// orange. A power curve lifts low saturations at least as much (0.05 -> 0.22
+// vs. the old 3x's 0.15) while leaving the relative ordering between
+// mid/high saturations intact instead of clamping them all to the same
+// ceiling.
+const SATURATION_GAMMA: f64 = 0.5;
 
 // JetBrains Mono, bundled under the SIL OFL 1.1 (see assets/JetBrainsMono-OFL.txt),
 // so `--out foo.png` doesn't depend on whatever fonts happen to be on the
@@ -209,7 +221,7 @@ fn build_grid(img: &DynamicImage, width: u32) -> Grid {
             let percentile = cdf[luminances[i] as usize] as f64 / total_pixels;
             let target_value = percentile.powf(1.0 / COLOR_GAMMA);
             let (hue, saturation) = rgb_to_hue_sat(pixel[0], pixel[1], pixel[2]);
-            let saturation = (saturation * SATURATION_BOOST).min(1.0);
+            let saturation = saturation.powf(SATURATION_GAMMA);
             cells.push(Cell {
                 glyph,
                 color: hsv_to_rgb(hue, saturation, target_value),
@@ -308,43 +320,92 @@ pub fn auto_background(grid: &Grid) -> [u8; 3] {
     [channel(r), channel(g), channel(b)]
 }
 
+/// Background for `render_image`: either a fully solid backdrop, or a
+/// (possibly zero-opacity) tinted one, so the art can be composited over
+/// something else (a slide, a web page, another image) with the glyphs
+/// still popping against a hint of backdrop color rather than nothing at
+/// all. `Opaque` is kept as its own variant rather than folded into
+/// `Translucent { alpha: 255, .. }` so the common case still renders onto a
+/// plain `RgbImage` instead of carrying a needless all-255 alpha channel.
+pub enum Background {
+    Opaque([u8; 3]),
+    Translucent { color: [u8; 3], alpha: u8 },
+}
+
 // Renders the same glyph grid to a raster image, so ASCII/ANSI art can be
 // shared as a PNG/JPG rather than just pasted as text. Cell positions are
 // placed directly from grid coordinates instead of running the font's own
 // text layout, since we want a fixed-size monospace grid regardless of this
 // particular font's own advance-width metrics.
-pub fn render_image(grid: &Grid, mono: bool, bg: [u8; 3]) -> RgbImage {
+//
+// Opaque and translucent backgrounds need different pixel types (`Rgb<u8>`
+// has nowhere to put an alpha channel), so this renders onto whichever of
+// `RgbImage`/`RgbaImage` fits and hands back a `DynamicImage` -- callers
+// don't need to care which one they got, since both save to any format that
+// supports their color type.
+pub fn render_image(grid: &Grid, mono: bool, bg: Background) -> DynamicImage {
     let font = FontRef::try_from_slice(FONT_BYTES).expect("bundled font is valid");
     let scale = PxScale::from(CELL_PIXEL_HEIGHT as f32);
-
     let img_width = grid.width * CELL_PIXEL_WIDTH;
     let img_height = grid.height * CELL_PIXEL_HEIGHT;
-    let mut canvas = RgbImage::from_pixel(img_width, img_height, Rgb(bg));
 
-    for y in 0..grid.height {
-        for x in 0..grid.width {
-            let cell = &grid.cells[(y * grid.width + x) as usize];
-            if cell.glyph == ' ' {
-                continue;
+    match bg {
+        Background::Opaque(color) => {
+            let mut canvas = RgbImage::from_pixel(img_width, img_height, Rgb(color));
+            for y in 0..grid.height {
+                for x in 0..grid.width {
+                    let cell = &grid.cells[(y * grid.width + x) as usize];
+                    if cell.glyph == ' ' {
+                        continue;
+                    }
+                    let color = if mono {
+                        Rgb([255, 255, 255])
+                    } else {
+                        Rgb(cell.color)
+                    };
+                    let mut buf = [0u8; 4];
+                    let glyph_str = cell.glyph.encode_utf8(&mut buf);
+                    draw_text_mut(
+                        &mut canvas,
+                        color,
+                        (x * CELL_PIXEL_WIDTH) as i32,
+                        (y * CELL_PIXEL_HEIGHT) as i32,
+                        scale,
+                        &font,
+                        glyph_str,
+                    );
+                }
             }
-            let color = if mono {
-                Rgb([255, 255, 255])
-            } else {
-                Rgb(cell.color)
-            };
-            let mut buf = [0u8; 4];
-            let glyph_str = cell.glyph.encode_utf8(&mut buf);
-            draw_text_mut(
-                &mut canvas,
-                color,
-                (x * CELL_PIXEL_WIDTH) as i32,
-                (y * CELL_PIXEL_HEIGHT) as i32,
-                scale,
-                &font,
-                glyph_str,
+            DynamicImage::ImageRgb8(canvas)
+        }
+        Background::Translucent { color, alpha } => {
+            let mut canvas = RgbaImage::from_pixel(
+                img_width,
+                img_height,
+                Rgba([color[0], color[1], color[2], alpha]),
             );
+            for y in 0..grid.height {
+                for x in 0..grid.width {
+                    let cell = &grid.cells[(y * grid.width + x) as usize];
+                    if cell.glyph == ' ' {
+                        continue;
+                    }
+                    let [r, g, b] = if mono { [255, 255, 255] } else { cell.color };
+                    let color = Rgba([r, g, b, 255]);
+                    let mut buf = [0u8; 4];
+                    let glyph_str = cell.glyph.encode_utf8(&mut buf);
+                    draw_text_mut(
+                        &mut canvas,
+                        color,
+                        (x * CELL_PIXEL_WIDTH) as i32,
+                        (y * CELL_PIXEL_HEIGHT) as i32,
+                        scale,
+                        &font,
+                        glyph_str,
+                    );
+                }
+            }
+            DynamicImage::ImageRgba8(canvas)
         }
     }
-
-    canvas
 }
