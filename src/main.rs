@@ -19,8 +19,15 @@ struct Cli {
 enum Command {
     /// Generate an image from a text prompt, then convert it to ASCII art.
     Generate {
-        /// The prompt describing the image to generate.
-        prompt: String,
+        /// The prompt describing the image to generate. Omit this and use
+        /// `--prompt-file` instead to read the prompt from a file.
+        #[arg(required_unless_present = "prompt_file", conflicts_with = "prompt_file")]
+        prompt: Option<String>,
+        /// Read the prompt from this file instead of passing it as an
+        /// argument. Any plain text file works (`.txt`, `.md`, etc.);
+        /// leading/trailing whitespace is trimmed.
+        #[arg(long)]
+        prompt_file: Option<PathBuf>,
         #[command(flatten)]
         options: ConvertOptions,
         /// Aspect ratio of the generated image.
@@ -155,17 +162,44 @@ fn supports_alpha(path: &Path) -> bool {
     )
 }
 
+/// Resolves the effective prompt text for `generate`: either the positional
+/// `prompt` argument or the contents of `prompt_file`, whichever was given
+/// (clap's `conflicts_with`/`required_unless_present` guarantee exactly one
+/// is `Some`). File contents are trimmed since editors routinely add a
+/// trailing newline that shouldn't become part of the prompt.
+fn resolve_prompt(prompt: Option<String>, prompt_file: Option<&Path>) -> Result<String, String> {
+    if let Some(path) = prompt_file {
+        let contents = std::fs::read_to_string(path)
+            .map_err(|err| format!("failed to read prompt file {}: {}", path.display(), err))?;
+        let trimmed = contents.trim();
+        if trimmed.is_empty() {
+            return Err(format!("prompt file {} is empty", path.display()));
+        }
+        Ok(trimmed.to_string())
+    } else {
+        Ok(prompt.expect("clap guarantees prompt or prompt_file is set"))
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
 
     match cli.command {
         Command::Generate {
             prompt,
+            prompt_file,
             options,
             size,
             save_image,
             count,
         } => {
+            let prompt = match resolve_prompt(prompt, prompt_file.as_deref()) {
+                Ok(prompt) => prompt,
+                Err(err) => {
+                    eprintln!("{err}");
+                    std::process::exit(1);
+                }
+            };
             let images = match openai::generate_images(&prompt, size.as_openai_size(), count) {
                 Ok(images) => images,
                 Err(err) => {

@@ -72,6 +72,16 @@ halftone generate "a neon-lit alley cat in the rain" --count 4 --out cat.png
 # -> cat-1.png, cat-2.png, cat-3.png, cat-4.png
 ```
 
+### Read the prompt from a file
+
+```sh
+halftone generate --prompt-file prompt.md
+```
+
+Any plain text file works (`.txt`, `.md`, or no extension at all) —
+leading/trailing whitespace is trimmed. `--prompt-file` replaces the
+positional prompt argument; pass one or the other, not both.
+
 ### Options
 
 Available on both `convert` and `generate`:
@@ -121,6 +131,7 @@ guaranteed backdrop.
 | `--size <shape>`       | `square` (1024x1024), `landscape` (1536x1024), or `portrait` (1024x1536) | `square` |
 | `--save-image <path>`  | Also save the raw generated image, before conversion       | —        |
 | `-n, --count <N>`      | Generate this many images from the same prompt (1-10)      | `1`      |
+| `--prompt-file <path>` | Read the prompt from a file instead of the positional argument | —    |
 
 `--count` asks OpenAI for all `N` images in a single request rather than
 making `N` separate calls. When `--count` is greater than 1, `--out` and
