@@ -25,6 +25,7 @@ struct ImageRequest<'a> {
     prompt: &'a str,
     n: u32,
     size: &'a str,
+    quality: &'a str,
 }
 
 #[derive(Deserialize)]
@@ -66,7 +67,9 @@ enum BatchError {
 
 /// Generates `count` image(s) from `prompt` via OpenAI's gpt-image-1 and
 /// returns the raw image bytes for each. `size` must be one of the sizes
-/// gpt-image-1 accepts: "1024x1024", "1536x1024", or "1024x1536".
+/// gpt-image-1 accepts: "1024x1024", "1536x1024", or "1024x1536". Always
+/// requested at "low" quality -- see the comment on `quality` in
+/// `request_batch` for why.
 ///
 /// Requesting `count` up front (gpt-image-1's own `n` parameter) rather than
 /// making `count` separate calls gets every variation from a single round
@@ -154,6 +157,10 @@ fn request_batch(
         prompt,
         n,
         size,
+        // The output gets reduced to a halftone dot pattern anyway, so the
+        // fine detail "medium"/"high" pays for is wasted -- "low" cuts the
+        // per-image cost roughly 4-15x with no visible difference downstream.
+        quality: "low",
     };
 
     let response = client
