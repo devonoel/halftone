@@ -21,7 +21,10 @@ enum Command {
     Generate {
         /// The prompt describing the image to generate. Omit this and use
         /// `--prompt-file` instead to read the prompt from a file.
-        #[arg(required_unless_present = "prompt_file", conflicts_with = "prompt_file")]
+        #[arg(
+            required_unless_present = "prompt_file",
+            conflicts_with = "prompt_file"
+        )]
         prompt: Option<String>,
         /// Read the prompt from this file instead of passing it as an
         /// argument. Any plain text file works (`.txt`, `.md`, etc.);
@@ -97,6 +100,28 @@ struct ConvertOptions {
     /// from the terminal it's viewed in.
     #[arg(long, default_value = "auto")]
     bg: String,
+
+    /// Give each cell its own background color, blended from the flat
+    /// background toward that cell's glyph color by this fraction (0-1),
+    /// instead of one flat background behind everything. `0` (the default)
+    /// keeps the flat background; around `0.3`-`0.4` fills the gaps between
+    /// glyphs with color while they still stand out; higher values push
+    /// toward a solid color mosaic. Applies to both ANSI and image output,
+    /// and covers `--bg`'s color in images (a translucent `--bg`'s alpha is
+    /// kept). Ignored with `--mono`.
+    #[arg(long, default_value_t = 0.0, value_parser = parse_unit_interval)]
+    cell_bg: f64,
+}
+
+fn parse_unit_interval(s: &str) -> Result<f64, String> {
+    let value: f64 = s.parse().map_err(|_| format!("'{s}' is not a number"))?;
+    if (0.0..=1.0).contains(&value) {
+        Ok(value)
+    } else {
+        Err(format!(
+            "{value} is out of range: expected a number from 0 to 1"
+        ))
+    }
 }
 
 /// Resolves the `--bg` value against a converted grid. The color part is
@@ -230,7 +255,7 @@ fn main() {
                 match pipeline::convert_bytes(&bytes, options.width) {
                     Ok(grid) => {
                         let out = options.out.as_deref().map(|p| indexed_path(p, i, total));
-                        write_output(&grid, options.mono, &options.bg, out.as_deref())
+                        write_output(&grid, &options, out.as_deref())
                     }
                     Err(err) => {
                         eprintln!("failed to convert generated image: {err}");
@@ -243,7 +268,7 @@ fn main() {
             image_path,
             options,
         } => match pipeline::convert_image(&image_path, options.width) {
-            Ok(grid) => write_output(&grid, options.mono, &options.bg, options.out.as_deref()),
+            Ok(grid) => write_output(&grid, &options, options.out.as_deref()),
             Err(err) => {
                 eprintln!("failed to convert {}: {}", image_path.display(), err);
                 std::process::exit(1);
@@ -285,14 +310,15 @@ fn is_image_path(path: &Path) -> bool {
     )
 }
 
-fn write_output(grid: &pipeline::Grid, mono: bool, bg: &str, out: Option<&Path>) {
-    let art = pipeline::render_ansi(grid, mono);
+fn write_output(grid: &pipeline::Grid, options: &ConvertOptions, out: Option<&Path>) {
+    let mono = options.mono;
+    let art = pipeline::render_ansi(grid, mono, options.cell_bg);
     print!("{art}");
 
     let Some(path) = out else { return };
 
     if is_image_path(path) {
-        let bg = resolve_bg(bg, grid).unwrap_or_else(|err| {
+        let bg = resolve_bg(&options.bg, grid).unwrap_or_else(|err| {
             eprintln!("{err}");
             std::process::exit(1);
         });
@@ -303,7 +329,7 @@ fn write_output(grid: &pipeline::Grid, mono: bool, bg: &str, out: Option<&Path>)
             );
             std::process::exit(1);
         }
-        let image = pipeline::render_image(grid, mono, bg);
+        let image = pipeline::render_image(grid, mono, bg, options.cell_bg);
         if let Err(err) = image.save(path) {
             eprintln!("failed to write {}: {}", path.display(), err);
             std::process::exit(1);

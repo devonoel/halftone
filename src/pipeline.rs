@@ -1,5 +1,8 @@
 use ab_glyph::{FontRef, PxScale};
-use image::{DynamicImage, GenericImageView, Rgb, RgbImage, Rgba, RgbaImage, imageops::FilterType};
+use image::{
+    DynamicImage, GenericImageView, ImageBuffer, Pixel, Rgb, RgbImage, Rgba, RgbaImage,
+    imageops::FilterType,
+};
 use imageproc::drawing::draw_text_mut;
 use std::path::Path;
 
@@ -251,17 +254,64 @@ fn build_grid(img: &DynamicImage, width: u32) -> Grid {
     }
 }
 
-pub fn render_ansi(grid: &Grid, mono: bool) -> String {
+/// Background color painted behind a single cell when `--cell-bg` is on: a
+/// blend from the flat `base` background toward the cell's own glyph color,
+/// `strength` of the way there. Staying below the glyph color keeps the
+/// brightness gap that makes the glyph readable, while filling the gaps
+/// between strokes with that cell's own hue.
+///
+/// Blending from `base` rather than simply dimming the glyph color toward
+/// black matters for the darkest cells: equalization pins their brightness
+/// near zero, so a pure scale leaves them as pitch-black tiles that punch
+/// holes through otherwise continuous color. Starting from `base` lets them
+/// settle back into the same tinted backdrop the rest of the image sits on,
+/// and makes a strength of 0 exactly the old flat-background look.
+fn cell_background(color: [u8; 3], base: [u8; 3], strength: f64) -> [u8; 3] {
+    let blend = |c: u8, b: u8| {
+        (b as f64 + (c as f64 - b as f64) * strength)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    [
+        blend(color[0], base[0]),
+        blend(color[1], base[1]),
+        blend(color[2], base[2]),
+    ]
+}
+
+/// `cell_bg` is the `--cell-bg` strength (0 disables per-cell backgrounds and
+/// leaves the terminal's own background showing through, as before). There's
+/// no `--bg` for ANSI output, so cells blend from `auto_background` instead.
+pub fn render_ansi(grid: &Grid, mono: bool, cell_bg: f64) -> String {
+    let base = auto_background(grid);
     let mut out = String::with_capacity((grid.width as usize + 1) * grid.height as usize);
     for y in 0..grid.height {
+        // Neighboring cells frequently land on the same color, and every
+        // escape is ~19 bytes against a 1-byte glyph, so only emit one when
+        // the color actually changes. Reset per row since each row ends
+        // with `\x1b[0m`.
+        let mut last_fg = None;
+        let mut last_bg = None;
         for x in 0..grid.width {
             let cell = &grid.cells[(y * grid.width + x) as usize];
             if mono {
                 out.push(cell.glyph);
-            } else {
-                let [r, g, b] = cell.color;
-                out.push_str(&format!("\x1b[38;2;{r};{g};{b}m{}", cell.glyph));
+                continue;
             }
+            if cell_bg > 0.0 {
+                let bg = cell_background(cell.color, base, cell_bg);
+                if last_bg != Some(bg) {
+                    let [r, g, b] = bg;
+                    out.push_str(&format!("\x1b[48;2;{r};{g};{b}m"));
+                    last_bg = Some(bg);
+                }
+            }
+            if last_fg != Some(cell.color) {
+                let [r, g, b] = cell.color;
+                out.push_str(&format!("\x1b[38;2;{r};{g};{b}m"));
+                last_fg = Some(cell.color);
+            }
+            out.push(cell.glyph);
         }
         if !mono {
             out.push_str("\x1b[0m");
@@ -332,6 +382,17 @@ pub enum Background {
     Translucent { color: [u8; 3], alpha: u8 },
 }
 
+/// Fills one character cell's pixel rectangle with a solid color, for
+/// `--cell-bg`. Generic over pixel type so the opaque (`Rgb`) and translucent
+/// (`Rgba`) canvases in `render_image` can share it.
+fn fill_cell<P: Pixel>(canvas: &mut ImageBuffer<P, Vec<P::Subpixel>>, x: u32, y: u32, color: P) {
+    for py in y * CELL_PIXEL_HEIGHT..(y + 1) * CELL_PIXEL_HEIGHT {
+        for px in x * CELL_PIXEL_WIDTH..(x + 1) * CELL_PIXEL_WIDTH {
+            canvas.put_pixel(px, py, color);
+        }
+    }
+}
+
 // Renders the same glyph grid to a raster image, so ASCII/ANSI art can be
 // shared as a PNG/JPG rather than just pasted as text. Cell positions are
 // placed directly from grid coordinates instead of running the font's own
@@ -343,7 +404,14 @@ pub enum Background {
 // `RgbImage`/`RgbaImage` fits and hands back a `DynamicImage` -- callers
 // don't need to care which one they got, since both save to any format that
 // supports their color type.
-pub fn render_image(grid: &Grid, mono: bool, bg: Background) -> DynamicImage {
+//
+// With `cell_bg > 0`, every cell is first painted with its own backdrop color
+// (see `cell_background`) before its glyph is drawn -- including blank cells,
+// which become solid tiles instead of letting `bg` show through. The tiles
+// cover `bg`'s color entirely, but a translucent `bg`'s alpha carries over
+// to them so a semi-transparent export stays semi-transparent.
+pub fn render_image(grid: &Grid, mono: bool, bg: Background, cell_bg: f64) -> DynamicImage {
+    let cell_bg = if mono { 0.0 } else { cell_bg };
     let font = FontRef::try_from_slice(FONT_BYTES).expect("bundled font is valid");
     let scale = PxScale::from(CELL_PIXEL_HEIGHT as f32);
     let img_width = grid.width * CELL_PIXEL_WIDTH;
@@ -355,6 +423,14 @@ pub fn render_image(grid: &Grid, mono: bool, bg: Background) -> DynamicImage {
             for y in 0..grid.height {
                 for x in 0..grid.width {
                     let cell = &grid.cells[(y * grid.width + x) as usize];
+                    if cell_bg > 0.0 {
+                        fill_cell(
+                            &mut canvas,
+                            x,
+                            y,
+                            Rgb(cell_background(cell.color, color, cell_bg)),
+                        );
+                    }
                     if cell.glyph == ' ' {
                         continue;
                     }
@@ -387,6 +463,10 @@ pub fn render_image(grid: &Grid, mono: bool, bg: Background) -> DynamicImage {
             for y in 0..grid.height {
                 for x in 0..grid.width {
                     let cell = &grid.cells[(y * grid.width + x) as usize];
+                    if cell_bg > 0.0 {
+                        let [r, g, b] = cell_background(cell.color, color, cell_bg);
+                        fill_cell(&mut canvas, x, y, Rgba([r, g, b, alpha]));
+                    }
                     if cell.glyph == ' ' {
                         continue;
                     }

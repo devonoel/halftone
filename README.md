@@ -92,6 +92,7 @@ Available on both `convert` and `generate`:
 | `--out <path>`    | Write output to a file (also prints to stdout)     | —       |
 | `--mono`          | Emit plain grayscale ASCII instead of ANSI color   | off     |
 | `--bg <spec>`     | Background color for image exports                | `auto`  |
+| `--cell-bg <0-1>` | Tint each cell's background with its own color    | `0`     |
 
 `--out` accepts either a text path (`.txt`, `.ansi`, or anything else) to
 save the raw ANSI/ASCII text, or an image path (`.png`, `.jpg`/`.jpeg`,
@@ -115,6 +116,15 @@ Pass a hex color like `--bg 1e2b30` to pick one explicitly.
   `auto@128` or `1e2b30@80`. A backdrop still shows through at the given
   opacity for contrast, without hiding whatever the art gets composited
   onto. Also PNG output only.
+
+`--cell-bg` gives every cell its own background instead of one flat color
+behind the whole image: a blend from the flat background toward that cell's
+glyph color, the given fraction of the way there. This fills the dark gaps
+between glyphs with color, for a denser, more painterly result. Around
+`0.3`–`0.4` keeps the glyphs clearly readable; higher values push toward a
+solid color mosaic. Unlike `--bg`, it applies to ANSI output too (using the
+same `auto` background as the base). In image exports it covers `--bg`'s
+color, but keeps a translucent `--bg`'s opacity.
 
 Note that the color pipeline (equalization, saturation, the tuned background)
 is built around dark backgrounds and colorful source images — glyph colors
