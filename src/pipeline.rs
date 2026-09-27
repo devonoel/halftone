@@ -668,11 +668,12 @@ fn cell_background(cell: &Cell, base: [u8; 3]) -> [u8; 3] {
     ]
 }
 
-/// `cell_bg` paints each cell's own background (see `cell_background`);
-/// without it the terminal's own background shows through. There's no
-/// `--bg` for ANSI output, so cells blend from `auto_background` instead.
-pub fn render_ansi(grid: &Grid, mono: bool, cell_bg: bool) -> String {
-    let base = auto_background(grid);
+/// `cell_bg` paints each cell's own background (see `cell_background`),
+/// blended from `base` -- the resolved `--bg` color, the same one the grid's
+/// glyphs were picked against. Without it the terminal's own background
+/// shows through; terminals have no notion of opacity, so a flat or
+/// transparent backdrop is left to the terminal entirely.
+pub fn render_ansi(grid: &Grid, mono: bool, cell_bg: bool, base: [u8; 3]) -> String {
     let mut out = String::with_capacity((grid.width as usize + 1) * grid.height as usize);
     for y in 0..grid.height {
         // Neighboring cells frequently land on the same color, and every

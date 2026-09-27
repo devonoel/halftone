@@ -88,17 +88,17 @@ struct ConvertOptions {
     #[arg(long)]
     mono: bool,
 
-    /// Background color for image (`--out foo.png`) exports: `auto` to derive
-    /// a dark background tinted toward the image's own average color, a hex
-    /// color like `1e2b30` / `#1e2b30`, or `transparent` to leave everything
-    /// but the glyphs transparent. Append `@<0-255>` to `auto` or a hex color
-    /// (e.g. `auto@128`, `1e2b30@80`) for a semi-transparent tinted
-    /// background instead of fully opaque or fully invisible -- a backdrop
-    /// still shows through for contrast, without hiding whatever the art
-    /// gets composited onto. Anything other than full opacity is PNG output
-    /// only. Has no effect on ANSI/text output, whose per-cell backgrounds
-    /// always blend from `auto` (and with `--flat-bg`, takes its background
-    /// from the terminal it's viewed in).
+    /// Backdrop color every cell's background is blended onto (or, with
+    /// `--flat-bg`, the one flat background): `auto` to derive a dark color
+    /// tinted toward the image's own average color, a hex color like
+    /// `1e2b30` / `#1e2b30`, or `transparent` for no backdrop at all -- only
+    /// the glyphs are drawn, over a transparent PNG or the terminal's own
+    /// background (implies `--flat-bg`). Append `@<0-255>` to `auto` or a
+    /// hex color (e.g. `auto@128`, `1e2b30@80`) for a semi-transparent
+    /// backdrop in PNG exports, so whatever the art gets composited onto
+    /// shows through; terminals have no opacity, so ANSI output uses the
+    /// color as-is. Anything other than full opacity is PNG output only. In
+    /// the terminal, `--flat-bg` leaves the background to the terminal.
     #[arg(long, default_value = "auto")]
     bg: String,
 
@@ -345,13 +345,18 @@ fn is_image_path(path: &Path) -> bool {
 
 fn write_output(grid: &pipeline::Grid, options: &ConvertOptions, out: Option<&Path>) {
     let mono = options.mono;
-    let art = pipeline::render_ansi(grid, mono, options.cell_bg());
+    let bg = resolve_bg(&options.bg_spec(), grid);
+    let base = match bg {
+        pipeline::Background::Opaque(color) | pipeline::Background::Translucent { color, .. } => {
+            color
+        }
+    };
+    let art = pipeline::render_ansi(grid, mono, options.cell_bg(), base);
     print!("{art}");
 
     let Some(path) = out else { return };
 
     if is_image_path(path) {
-        let bg = resolve_bg(&options.bg_spec(), grid);
         if matches!(bg, pipeline::Background::Translucent { .. }) && !supports_alpha(path) {
             eprintln!(
                 "a non-opaque `--bg` needs an alpha channel, which {} doesn't support here -- use a `.png` path instead.",

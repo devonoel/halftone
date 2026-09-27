@@ -110,39 +110,41 @@ Available on both `convert` and `generate`:
 | `--width <N>`     | Output width in characters                        | `80`    |
 | `--out <path>`    | Write output to a file (also prints to stdout)     | —       |
 | `--mono`          | Emit plain grayscale ASCII instead of ANSI color   | off     |
-| `--bg <spec>`     | Background color for image exports                | `auto`  |
+| `--bg <spec>`     | Backdrop color (`auto`, hex, or `transparent`)    | `auto`  |
 | `--flat-bg`       | One flat background instead of per-cell colors     | off     |
 
 `--out` accepts either a text path (`.txt`, `.ansi`, or anything else) to
 save the raw ANSI/ASCII text, or an image path (`.png`, `.jpg`/`.jpeg`,
 `.bmp`, `.tiff`, `.webp`) to save a rasterized image of the art instead —
 the format is picked automatically from the extension. Either way, the
-colored/mono art is still printed to stdout. `--bg` only affects image
-exports — text/ANSI output's per-cell backgrounds always blend from the
-`auto` color, and with `--flat-bg` it has no background of its own, just
-whatever your terminal is set to. By default (`auto`) the background is
-derived from the source image's own average color, darkened, so the export
-reads as a natural dark theme tinted to the image rather than flat black.
-Pass a hex color like `--bg 1e2b30` to pick one explicitly.
+colored/mono art is still printed to stdout.
+
+Every cell gets its own background by default, blended from a shared
+backdrop color toward the darker of that cell's two main colors (the glyph
+takes the lighter one) — just over half backdrop, the rest the cell's own
+tone. `--bg` sets that backdrop, in both the terminal and image exports. By
+default (`auto`) it's derived from the source image's own average color,
+muted and darkened, so the art reads as a natural dark theme tinted to the
+image rather than flat black. Pass a hex color like `--bg 1e2b30` to tint
+everything toward a color of your choosing instead.
 
 `--bg` also accepts:
 
-- `transparent` — drop the background entirely, so only the glyphs
-  themselves are opaque. Useful for compositing the art over a slide, web
-  page, or another image. PNG output only (`.jpg`/`.bmp`/`.tiff` have no
-  alpha channel to hold it, and are rejected with an error rather than
-  silently flattening to black).
-- `<auto|hex>@<0-255>` — a semi-transparent tinted background, e.g.
-  `auto@128` or `1e2b30@80`. A backdrop still shows through at the given
-  opacity for contrast, without hiding whatever the art gets composited
-  onto. Also PNG output only.
+- `transparent` — no backdrop at all, so only the glyphs themselves are
+  drawn: over a transparent PNG, or over your terminal's own background.
+  Useful for compositing the art over a slide, web page, or another image.
+  Implies `--flat-bg`. For image exports, PNG only (`.jpg`/`.bmp`/`.tiff`
+  have no alpha channel to hold it, and are rejected with an error rather
+  than silently flattening to black).
+- `<auto|hex>@<0-255>` — a semi-transparent backdrop, e.g. `auto@128` or
+  `1e2b30@80`. The cell backgrounds keep their color but take on this
+  opacity, so whatever the art gets composited onto shows through. Also
+  PNG only for image exports; terminals have no opacity, so ANSI output
+  just uses the color.
 
-By default every cell also gets its own background, blended from the `--bg`
-color toward the darker of that cell's two main colors (the glyph takes the
-lighter one). That covers `--bg`'s color almost entirely, but a
-semi-transparent `--bg` keeps its opacity. Pass `--flat-bg` for one flat
-`--bg` color behind everything and a single color per cell instead;
-`--mono` and `--bg transparent` imply it.
+Pass `--flat-bg` for the simpler look: one flat `--bg` color behind
+everything and a single color per cell. In the terminal, `--flat-bg`
+leaves the background to your terminal. `--mono` implies it.
 
 Note that the color pipeline (equalization, saturation, the tuned background)
 is built around dark backgrounds and colorful source images — glyph colors
