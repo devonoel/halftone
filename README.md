@@ -10,7 +10,20 @@ preserve detail that naive brightness-to-glyph mapping throws away. It can
 also generate the source image for you from a text prompt via OpenAI's
 `gpt-image-1`, so you can go from an idea to terminal art in one command.
 
-![Example output of halftone converting a painting of a bartender into colored ASCII art](docs/example.png)
+<table>
+  <tr>
+    <td><img src="docs/example-default.png" alt="A generated painting of an elf bartender converted to colored ASCII art, with each character cell given its own two-tone background"></td>
+    <td><img src="docs/example-flat.png" alt="The same elf bartender as colored ASCII art on a single flat dark background"></td>
+    <td><img src="docs/example-mono.png" alt="The same elf bartender as plain monochrome ASCII art"></td>
+  </tr>
+  <tr>
+    <td align="center">Default</td>
+    <td align="center"><code>--flat-bg</code></td>
+    <td align="center"><code>--mono</code></td>
+  </tr>
+</table>
+
+<sub>All three from one prompt: <code>halftone generate "A fantasy painting of a D&amp;D elf bartender..." --width 90</code></sub>
 
 ## Features
 
@@ -25,6 +38,12 @@ also generate the source image for you from a text prompt via OpenAI's
   sampled RGB, so hue differences that share a luminance (green skin vs. tan
   leather vs. brown wood) don't get flattened away. `--mono` gives you plain
   grayscale ASCII instead.
+- **Two-tone cells** — every cell gets its own background as well as its
+  own glyph color, split from the two main colors inside that cell, so the
+  gaps between glyphs carry color and detail instead of flat black.
+  Glyphs are dithered by the color they'll actually show, and sharp edges
+  get glyphs shaped to match (`/`, `_`, `|`, `(`, ...). `--flat-bg` gives you
+  the simpler one-background look instead.
 - **Text-to-art generation** — skip the source image entirely and describe
   what you want; `halftone generate` calls OpenAI's image API and pipes the
   result straight into the same conversion pipeline.
@@ -92,14 +111,15 @@ Available on both `convert` and `generate`:
 | `--out <path>`    | Write output to a file (also prints to stdout)     | —       |
 | `--mono`          | Emit plain grayscale ASCII instead of ANSI color   | off     |
 | `--bg <spec>`     | Background color for image exports                | `auto`  |
-| `--cell-bg <0-1>` | Tint each cell's background with its own color    | `0`     |
+| `--flat-bg`       | One flat background instead of per-cell colors     | off     |
 
 `--out` accepts either a text path (`.txt`, `.ansi`, or anything else) to
 save the raw ANSI/ASCII text, or an image path (`.png`, `.jpg`/`.jpeg`,
 `.bmp`, `.tiff`, `.webp`) to save a rasterized image of the art instead —
 the format is picked automatically from the extension. Either way, the
 colored/mono art is still printed to stdout. `--bg` only affects image
-exports — text/ANSI output has no background of its own, it just takes on
+exports — text/ANSI output's per-cell backgrounds always blend from the
+`auto` color, and with `--flat-bg` it has no background of its own, just
 whatever your terminal is set to. By default (`auto`) the background is
 derived from the source image's own average color, darkened, so the export
 reads as a natural dark theme tinted to the image rather than flat black.
@@ -117,14 +137,12 @@ Pass a hex color like `--bg 1e2b30` to pick one explicitly.
   opacity for contrast, without hiding whatever the art gets composited
   onto. Also PNG output only.
 
-`--cell-bg` gives every cell its own background instead of one flat color
-behind the whole image: a blend from the flat background toward that cell's
-glyph color, the given fraction of the way there. This fills the dark gaps
-between glyphs with color, for a denser, more painterly result. Around
-`0.3`–`0.4` keeps the glyphs clearly readable; higher values push toward a
-solid color mosaic. Unlike `--bg`, it applies to ANSI output too (using the
-same `auto` background as the base). In image exports it covers `--bg`'s
-color, but keeps a translucent `--bg`'s opacity.
+By default every cell also gets its own background, blended from the `--bg`
+color toward the darker of that cell's two main colors (the glyph takes the
+lighter one). That covers `--bg`'s color almost entirely, but a
+semi-transparent `--bg` keeps its opacity. Pass `--flat-bg` for one flat
+`--bg` color behind everything and a single color per cell instead;
+`--mono` and `--bg transparent` imply it.
 
 Note that the color pipeline (equalization, saturation, the tuned background)
 is built around dark backgrounds and colorful source images — glyph colors

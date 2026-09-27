@@ -96,44 +96,41 @@ struct ConvertOptions {
     /// background instead of fully opaque or fully invisible -- a backdrop
     /// still shows through for contrast, without hiding whatever the art
     /// gets composited onto. Anything other than full opacity is PNG output
-    /// only. Has no effect on ANSI/text output, which takes its background
-    /// from the terminal it's viewed in.
+    /// only. Has no effect on ANSI/text output, whose per-cell backgrounds
+    /// always blend from `auto` (and with `--flat-bg`, takes its background
+    /// from the terminal it's viewed in).
     #[arg(long, default_value = "auto")]
     bg: String,
 
-    /// Give each cell its own background color, blended from the flat
-    /// background toward that cell's glyph color by this fraction (0-1),
-    /// instead of one flat background behind everything. `0` (the default)
-    /// keeps the flat background; around `0.3`-`0.4` fills the gaps between
-    /// glyphs with color while they still stand out; higher values push
-    /// toward a solid color mosaic. Applies to both ANSI and image output,
-    /// and covers `--bg`'s color in images (a translucent `--bg`'s alpha is
-    /// kept). Ignored with `--mono`.
-    #[arg(long, default_value_t = 0.0, value_parser = parse_unit_interval)]
-    cell_bg: f64,
+    /// Use one flat background color behind everything instead of giving
+    /// each cell its own. By default each cell is split into its two main
+    /// colors -- the glyph takes the lighter one, the background a dimmed
+    /// version of the darker one -- and glyphs are picked by the color the
+    /// cell actually ends up showing, with strong edges getting shape-matched
+    /// glyphs like `/`, `_`, `|`. This turns all of that off for the simpler
+    /// single-color-per-cell look. Implied by `--mono` and `--bg transparent`.
+    #[arg(long)]
+    flat_bg: bool,
 }
 
-fn parse_unit_interval(s: &str) -> Result<f64, String> {
-    let value: f64 = s.parse().map_err(|_| format!("'{s}' is not a number"))?;
-    if (0.0..=1.0).contains(&value) {
-        Ok(value)
-    } else {
-        Err(format!(
-            "{value} is out of range: expected a number from 0 to 1"
-        ))
-    }
+/// A parsed `--bg` value: the color (`None` for `auto`, which can only be
+/// worked out from the converted image) and its opacity.
+struct BgSpec {
+    color: Option<[u8; 3]>,
+    alpha: u8,
 }
 
-/// Resolves the `--bg` value against a converted grid. The color part is
-/// `auto` (derived from the grid's own average color) or a `RRGGBB`
-/// (optionally `#`-prefixed) hex color; `transparent` is shorthand for that
-/// color at zero opacity. An optional `@<0-255>` suffix on `auto`/hex picks
-/// the opacity directly, so a background can sit anywhere between fully
-/// opaque and fully invisible instead of only those two extremes.
-fn resolve_bg(bg: &str, grid: &pipeline::Grid) -> Result<pipeline::Background, String> {
+/// Parses the `--bg` value. The color part is `auto` (derived from the grid's
+/// own average color) or a `RRGGBB` (optionally `#`-prefixed) hex color;
+/// `transparent` is shorthand for black at zero opacity. An optional
+/// `@<0-255>` suffix on `auto`/hex picks the opacity directly, so a background
+/// can sit anywhere between fully opaque and fully invisible instead of only
+/// those two extremes. Parsed before conversion rather than after, since
+/// per-cell backgrounds need an explicit color to pick glyphs against.
+fn parse_bg(bg: &str) -> Result<BgSpec, String> {
     if bg.eq_ignore_ascii_case("transparent") {
-        return Ok(pipeline::Background::Translucent {
-            color: [0, 0, 0],
+        return Ok(BgSpec {
+            color: Some([0, 0, 0]),
             alpha: 0,
         });
     }
@@ -149,7 +146,7 @@ fn resolve_bg(bg: &str, grid: &pipeline::Grid) -> Result<pipeline::Background, S
     };
 
     let color = if spec.eq_ignore_ascii_case("auto") {
-        pipeline::auto_background(grid)
+        None
     } else {
         let hex = spec.strip_prefix('#').unwrap_or(spec);
         if hex.len() != 6 {
@@ -161,13 +158,49 @@ fn resolve_bg(bg: &str, grid: &pipeline::Grid) -> Result<pipeline::Background, S
             u8::from_str_radix(&hex[range], 16)
                 .map_err(|_| format!("invalid color '{spec}': not valid hex"))
         };
-        [channel(0..2)?, channel(2..4)?, channel(4..6)?]
+        Some([channel(0..2)?, channel(2..4)?, channel(4..6)?])
     };
 
-    if alpha == 255 {
-        Ok(pipeline::Background::Opaque(color))
+    Ok(BgSpec { color, alpha })
+}
+
+/// Resolves a parsed `--bg` against a converted grid, filling in `auto`.
+fn resolve_bg(bg: &BgSpec, grid: &pipeline::Grid) -> pipeline::Background {
+    let color = bg.color.unwrap_or_else(|| pipeline::auto_background(grid));
+    if bg.alpha == 255 {
+        pipeline::Background::Opaque(color)
     } else {
-        Ok(pipeline::Background::Translucent { color, alpha })
+        pipeline::Background::Translucent {
+            color,
+            alpha: bg.alpha,
+        }
+    }
+}
+
+impl ConvertOptions {
+    fn bg_spec(&self) -> BgSpec {
+        parse_bg(&self.bg).unwrap_or_else(|err| {
+            eprintln!("{err}");
+            std::process::exit(1);
+        })
+    }
+
+    /// Whether cells get their own backgrounds (the default). Not for
+    /// `--mono`, which has no color to put in them, nor for a fully
+    /// transparent `--bg`, which would render them invisible while glyphs
+    /// were still picked as if they showed -- a transparent export keeps
+    /// the flat look instead. A semi-transparent `--bg` keeps them, at its
+    /// opacity.
+    fn cell_bg(&self) -> bool {
+        !self.flat_bg && !self.mono && self.bg_spec().alpha != 0
+    }
+
+    fn settings(&self) -> pipeline::ConvertSettings {
+        pipeline::ConvertSettings {
+            width: self.width,
+            cell_bg: self.cell_bg(),
+            bg: self.bg_spec().color,
+        }
     }
 }
 
@@ -252,7 +285,7 @@ fn main() {
                 }
 
                 eprintln!("Converting to ASCII art...");
-                match pipeline::convert_bytes(&bytes, options.width) {
+                match pipeline::convert_bytes(&bytes, &options.settings()) {
                     Ok(grid) => {
                         let out = options.out.as_deref().map(|p| indexed_path(p, i, total));
                         write_output(&grid, &options, out.as_deref())
@@ -267,7 +300,7 @@ fn main() {
         Command::Convert {
             image_path,
             options,
-        } => match pipeline::convert_image(&image_path, options.width) {
+        } => match pipeline::convert_image(&image_path, &options.settings()) {
             Ok(grid) => write_output(&grid, &options, options.out.as_deref()),
             Err(err) => {
                 eprintln!("failed to convert {}: {}", image_path.display(), err);
@@ -312,16 +345,13 @@ fn is_image_path(path: &Path) -> bool {
 
 fn write_output(grid: &pipeline::Grid, options: &ConvertOptions, out: Option<&Path>) {
     let mono = options.mono;
-    let art = pipeline::render_ansi(grid, mono, options.cell_bg);
+    let art = pipeline::render_ansi(grid, mono, options.cell_bg());
     print!("{art}");
 
     let Some(path) = out else { return };
 
     if is_image_path(path) {
-        let bg = resolve_bg(&options.bg, grid).unwrap_or_else(|err| {
-            eprintln!("{err}");
-            std::process::exit(1);
-        });
+        let bg = resolve_bg(&options.bg_spec(), grid);
         if matches!(bg, pipeline::Background::Translucent { .. }) && !supports_alpha(path) {
             eprintln!(
                 "a non-opaque `--bg` needs an alpha channel, which {} doesn't support here -- use a `.png` path instead.",
@@ -329,7 +359,7 @@ fn write_output(grid: &pipeline::Grid, options: &ConvertOptions, out: Option<&Pa
             );
             std::process::exit(1);
         }
-        let image = pipeline::render_image(grid, mono, bg, options.cell_bg);
+        let image = pipeline::render_image(grid, mono, bg, options.cell_bg());
         if let Err(err) = image.save(path) {
             eprintln!("failed to write {}: {}", path.display(), err);
             std::process::exit(1);
