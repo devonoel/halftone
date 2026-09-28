@@ -1,6 +1,6 @@
 [package]
 name = "halftone"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Turn images into ANSI/ASCII splash art, right in your terminal"
@@ -8,13 +8,33 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/devonoel/halftone"
 keywords = ["ascii-art", "ansi", "image", "terminal"]
 categories = ["command-line-utilities"]
+# Golden images for the snapshot tests; only needed in the repo.
+exclude = ["tests/fixtures/", "tests/snapshots/"]
+
+[features]
+default = ["cli", "generate"]
+# The `halftone` binary itself. Crates using halftone as a library can turn
+# this off (`default-features = false`) to skip clap.
+cli = ["dep:clap"]
+# `halftone generate`: prompt-to-image through OpenAI's API. Pulls in an HTTP
+# client and TLS stack that the conversion/rendering library never touches.
+generate = ["cli", "dep:base64", "dep:reqwest", "dep:serde", "dep:serde_json"]
+
+[[bin]]
+name = "halftone"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[[test]]
+name = "cli"
+required-features = ["cli"]
 
 [dependencies]
 ab_glyph = "0.2.32"
-base64 = "0.22.1"
-clap = { version = "4.6.1", features = ["derive"] }
+base64 = { version = "0.22.1", optional = true }
+clap = { version = "4.6.1", features = ["derive"], optional = true }
 image = "0.25.10"
 imageproc = { version = "0.27.0", default-features = false, features = ["text"] }
-reqwest = { version = "0.13.4", features = ["blocking", "json"] }
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.150"
+reqwest = { version = "0.13.4", features = ["blocking", "json"], optional = true }
+serde = { version = "1.0.228", features = ["derive"], optional = true }
+serde_json = { version = "1.0.150", optional = true }

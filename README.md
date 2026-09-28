@@ -69,6 +69,17 @@ cargo build --release
 
 The binary will be at `target/release/halftone`.
 
+### Running the tests
+
+```sh
+cargo test
+```
+
+`tests/snapshots.rs` compares output against golden files in
+`tests/snapshots/`. After an intentional change to how images are converted
+or rendered, regenerate them with `UPDATE_SNAPSHOTS=1 cargo test --test
+snapshots`, and look over the new PNGs before committing.
+
 ## Usage
 
 ### Convert an existing image

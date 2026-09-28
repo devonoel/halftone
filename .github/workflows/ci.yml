@@ -17,7 +17,13 @@ jobs:
       - run: cargo build --verbose
       - run: cargo test --verbose
       - run: cargo fmt --check
-      - run: cargo clippy -- -D warnings
+      - run: cargo clippy --all-targets -- -D warnings
+      # The library alone, as a dependent crate would build it.
+      - run: cargo test --no-default-features --verbose
+      - run: cargo clippy --all-targets --no-default-features -- -D warnings
+      # The CLI without `generate`.
+      - run: cargo test --no-default-features --features cli --verbose
+      - run: cargo clippy --all-targets --no-default-features --features cli -- -D warnings
 
   # Publishes to crates.io and tags the release whenever a push to main
   # carries a Cargo.toml version with no matching git tag yet -- this only

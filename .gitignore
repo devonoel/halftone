@@ -4,3 +4,5 @@
 *.ansi
 .DS_Store
 !docs/*.png
+!tests/fixtures/*.png
+!tests/snapshots/*.png

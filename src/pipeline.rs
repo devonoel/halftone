@@ -228,12 +228,24 @@ fn hsv_to_rgb(hue: f64, saturation: f64, value: f64) -> [u8; 3] {
     [channel(r), channel(g), channel(b)]
 }
 
+/// A grid of glyph cells, ready for `render_ansi`/`render_image`. `cells` is
+/// row-major and must hold exactly `width * height` cells; the renderers
+/// index it by position and panic otherwise.
 pub struct Grid {
     pub width: u32,
     pub height: u32,
     pub cells: Vec<Cell>,
-    /// See `auto_background`.
-    auto_bg: [u8; 3],
+}
+
+/// The result of converting an image: its grid, plus the backdrop color
+/// derived from the source image for `--bg auto`.
+pub struct Conversion {
+    pub grid: Grid,
+    /// A dark background tinted toward the image's own average color (its
+    /// overall "temperature"), instead of defaulting to flat black
+    /// regardless of source. Comes from the source image rather than the
+    /// finished cells, which is why it lives here and not on `Grid`.
+    pub auto_bg: [u8; 3],
 }
 
 pub struct ConvertSettings {
@@ -248,12 +260,18 @@ pub struct ConvertSettings {
     pub bg: Option<[u8; 3]>,
 }
 
-pub fn convert_image(path: &Path, settings: &ConvertSettings) -> Result<Grid, image::ImageError> {
+pub fn convert_image(
+    path: &Path,
+    settings: &ConvertSettings,
+) -> Result<Conversion, image::ImageError> {
     let img = image::open(path)?;
     Ok(build_grid(&img, settings))
 }
 
-pub fn convert_bytes(bytes: &[u8], settings: &ConvertSettings) -> Result<Grid, image::ImageError> {
+pub fn convert_bytes(
+    bytes: &[u8],
+    settings: &ConvertSettings,
+) -> Result<Conversion, image::ImageError> {
     let img = image::load_from_memory(bytes)?;
     Ok(build_grid(&img, settings))
 }
@@ -355,7 +373,7 @@ fn two_tone_split(sub: &RgbImage, cell_x: u32, cell_y: u32) -> TwoToneSplit {
     }
 }
 
-fn build_grid(img: &DynamicImage, settings: &ConvertSettings) -> Grid {
+fn build_grid(img: &DynamicImage, settings: &ConvertSettings) -> Conversion {
     let (width, two_tone) = (settings.width, settings.cell_bg);
     let (img_w, img_h) = img.dimensions();
 
@@ -635,10 +653,12 @@ fn build_grid(img: &DynamicImage, settings: &ConvertSettings) -> Grid {
         }
     }
 
-    Grid {
-        width,
-        height,
-        cells,
+    Conversion {
+        grid: Grid {
+            width,
+            height,
+            cells,
+        },
         auto_bg,
     }
 }
@@ -727,14 +747,7 @@ const AUTO_BG_LUMINANCE: f64 = 34.0;
 // "cool" without giving the background enough saturation to compete.
 const AUTO_BG_TINT: f64 = 0.25;
 
-/// Derives a dark background color tinted toward the image's own average
-/// color (its overall "temperature"), instead of defaulting to flat black
-/// regardless of source.
-pub fn auto_background(grid: &Grid) -> [u8; 3] {
-    grid.auto_bg
-}
-
-/// Computes `auto_background` from each cell's plain-mode color. Always from
+/// Computes `Conversion::auto_bg` from each cell's plain-mode color. Always from
 /// those colors (rather than two-tone mode's lighter glyph tones) so the
 /// backdrop doesn't shift between modes.
 fn average_background(colors: &[[u8; 3]]) -> [u8; 3] {
@@ -879,5 +892,521 @@ pub fn render_image(grid: &Grid, mono: bool, bg: Background, cell_bg: bool) -> D
             }
             DynamicImage::ImageRgba8(canvas)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A horizontal gradient, black on the left to white on the right.
+    fn gradient(width: u32, height: u32) -> DynamicImage {
+        DynamicImage::ImageRgb8(RgbImage::from_fn(width, height, |x, _| {
+            let v = (x * 255 / (width - 1)) as u8;
+            Rgb([v, v, v])
+        }))
+    }
+
+    /// Something with hue and structure to it, for tests that need more than
+    /// a flat gradient: red rising left to right, blue rising top to bottom.
+    fn colorful(width: u32, height: u32) -> DynamicImage {
+        DynamicImage::ImageRgb8(RgbImage::from_fn(width, height, |x, y| {
+            Rgb([
+                (x * 255 / (width - 1)) as u8,
+                60,
+                (y * 255 / (height - 1)) as u8,
+            ])
+        }))
+    }
+
+    fn settings(width: u32, cell_bg: bool) -> ConvertSettings {
+        ConvertSettings {
+            width,
+            cell_bg,
+            bg: None,
+        }
+    }
+
+    fn uniform_grid(width: u32, height: u32, cell: fn() -> Cell) -> Grid {
+        Grid {
+            width,
+            height,
+            cells: (0..width * height).map(|_| cell()).collect(),
+        }
+    }
+
+    fn ramp_index(glyph: char) -> usize {
+        RAMP.iter()
+            .position(|&c| c as char == glyph)
+            .unwrap_or_else(|| panic!("{glyph:?} is not a ramp glyph"))
+    }
+
+    fn mask_rows(mask: u32) -> Vec<u32> {
+        (0..TWO_TONE_SUB_H)
+            .filter(|sy| (mask >> (sy * TWO_TONE_SUB_W)) & 0b1111 != 0)
+            .collect()
+    }
+
+    fn mask_columns(mask: u32, row: u32) -> Vec<u32> {
+        (0..TWO_TONE_SUB_W)
+            .filter(|sx| (mask >> (row * TWO_TONE_SUB_W + sx)) & 1 == 1)
+            .collect()
+    }
+
+    // --- color helpers ---
+
+    #[test]
+    fn hue_and_saturation_of_primaries_and_grays() {
+        assert_eq!(rgb_to_hue_sat(255, 0, 0), (0.0, 1.0));
+        assert_eq!(rgb_to_hue_sat(0, 255, 0), (120.0, 1.0));
+        assert_eq!(rgb_to_hue_sat(0, 0, 255), (240.0, 1.0));
+        assert_eq!(rgb_to_hue_sat(128, 128, 128), (0.0, 0.0));
+        assert_eq!(rgb_to_hue_sat(0, 0, 0), (0.0, 0.0));
+    }
+
+    #[test]
+    fn hsv_round_trips_through_hue_and_saturation() {
+        for rgb in [
+            [255, 0, 0],
+            [12, 200, 90],
+            [30, 60, 240],
+            [250, 250, 5],
+            [140, 20, 160],
+            [77, 77, 77],
+            [0, 0, 0],
+            [255, 255, 255],
+        ] {
+            let (hue, sat) = rgb_to_hue_sat(rgb[0], rgb[1], rgb[2]);
+            let value = *rgb.iter().max().unwrap() as f64 / 255.0;
+            let back = hsv_to_rgb(hue, sat, value);
+            for c in 0..3 {
+                assert!(
+                    (back[c] as i32 - rgb[c] as i32).abs() <= 1,
+                    "{rgb:?} came back as {back:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn luminance_weights_green_most_and_blue_least() {
+        assert_eq!(luminance([0, 0, 0]), 0.0);
+        assert!((luminance([255, 255, 255]) - 255.0).abs() < 1e-9);
+        assert!(luminance([0, 255, 0]) > luminance([255, 0, 0]));
+        assert!(luminance([255, 0, 0]) > luminance([0, 0, 255]));
+    }
+
+    // --- auto background ---
+
+    #[test]
+    fn auto_background_lands_on_target_luminance() {
+        for colors in [
+            vec![[200, 30, 30]; 4],
+            vec![[10, 10, 10], [250, 250, 250]],
+            vec![[30, 180, 90], [90, 30, 200], [255, 255, 0]],
+        ] {
+            let bg = average_background(&colors);
+            let lum = luminance(bg);
+            assert!(
+                (lum - AUTO_BG_LUMINANCE).abs() < 1.5,
+                "{colors:?} gave {bg:?} at luminance {lum}"
+            );
+        }
+    }
+
+    #[test]
+    fn auto_background_of_black_is_black() {
+        assert_eq!(average_background(&[[0, 0, 0]; 3]), [0, 0, 0]);
+    }
+
+    #[test]
+    fn auto_background_of_gray_is_neutral() {
+        let [r, g, b] = average_background(&[[128, 128, 128]]);
+        assert!(r == g && g == b, "got {:?}", [r, g, b]);
+    }
+
+    #[test]
+    fn auto_background_keeps_a_muted_tint() {
+        let source = [220, 40, 40];
+        let bg = average_background(&[source]);
+        let (source_hue, source_sat) = rgb_to_hue_sat(source[0], source[1], source[2]);
+        let (hue, sat) = rgb_to_hue_sat(bg[0], bg[1], bg[2]);
+        assert!(bg[0] > bg[1] && bg[0] > bg[2], "lost the red tint: {bg:?}");
+        assert!((hue - source_hue).abs() < 5.0);
+        assert!(sat < source_sat, "tint wasn't muted: {bg:?}");
+    }
+
+    #[test]
+    fn cell_background_blends_from_base_toward_shade() {
+        let cell = |shade| Cell {
+            glyph: '#',
+            color: [255, 255, 255],
+            shade,
+        };
+        assert_eq!(
+            cell_background(&cell([40, 50, 60]), [40, 50, 60]),
+            [40, 50, 60]
+        );
+        let expected = (100.0 * CELL_BG_STRENGTH).round() as u8;
+        assert_eq!(
+            cell_background(&cell([100, 100, 100]), [0, 0, 0]),
+            [expected; 3]
+        );
+    }
+
+    // --- glyph shapes ---
+
+    #[test]
+    fn blank_glyph_has_no_ink() {
+        let space = &glyph_shapes(" ")[0];
+        assert_eq!(space.mask, 0);
+        assert_eq!(space.coverage, 0.0);
+    }
+
+    #[test]
+    fn glyph_masks_follow_glyph_shapes() {
+        let shapes = glyph_shapes("-_|/\\");
+        let [dash, underscore, bar, slash, backslash] = &shapes[..] else {
+            unreachable!()
+        };
+
+        // `_` sits lower in the cell than `-`.
+        assert!(mask_rows(underscore.mask)[0] > *mask_rows(dash.mask).last().unwrap());
+
+        // `|` is one tall column.
+        let rows = mask_rows(bar.mask);
+        assert!(rows.len() >= TWO_TONE_SUB_H as usize / 2, "{rows:?}");
+        for &row in &rows {
+            assert_eq!(mask_columns(bar.mask, row), mask_columns(bar.mask, rows[0]));
+        }
+
+        // `/` leans right going up, `\` leans left.
+        let lean = |mask: u32| {
+            let rows = mask_rows(mask);
+            let top = mask_columns(mask, rows[0])[0] as i32;
+            let bottom = mask_columns(mask, *rows.last().unwrap())[0] as i32;
+            top - bottom
+        };
+        assert!(lean(slash.mask) > 0);
+        assert!(lean(backslash.mask) < 0);
+    }
+
+    #[test]
+    fn denser_glyphs_cover_more_of_the_cell() {
+        let shapes = glyph_shapes(".:#@");
+        for pair in shapes.windows(2) {
+            assert!(
+                pair[0].coverage < pair[1].coverage,
+                "{:?} covers more than {:?}",
+                pair[0].glyph,
+                pair[1].glyph
+            );
+        }
+    }
+
+    // --- conversion ---
+
+    #[test]
+    fn grid_height_corrects_for_cell_aspect_ratio() {
+        let conversion = build_grid(&gradient(200, 100), &settings(40, false));
+        assert_eq!(conversion.grid.width, 40);
+        assert_eq!(conversion.grid.height, 10);
+        assert_eq!(conversion.grid.cells.len(), 400);
+    }
+
+    #[test]
+    fn very_wide_images_still_get_one_row() {
+        let conversion = build_grid(&gradient(1000, 2), &settings(20, true));
+        assert_eq!(conversion.grid.height, 1);
+        assert_eq!(conversion.grid.cells.len(), 20);
+    }
+
+    #[test]
+    fn flat_mode_uses_only_ramp_glyphs_and_copies_color_to_shade() {
+        let conversion = build_grid(&colorful(64, 64), &settings(32, false));
+        for cell in &conversion.grid.cells {
+            ramp_index(cell.glyph);
+            assert_eq!(cell.shade, cell.color);
+        }
+    }
+
+    #[test]
+    fn two_tone_mode_uses_only_known_glyphs() {
+        let conversion = build_grid(&colorful(64, 64), &settings(32, true));
+        let allowed: Vec<char> = std::str::from_utf8(RAMP)
+            .unwrap()
+            .chars()
+            .chain(TWO_TONE_GLYPHS.chars())
+            .collect();
+        for cell in &conversion.grid.cells {
+            assert!(allowed.contains(&cell.glyph), "unexpected {:?}", cell.glyph);
+        }
+    }
+
+    #[test]
+    fn brighter_source_regions_get_denser_glyphs() {
+        let conversion = build_grid(&gradient(256, 128), &settings(40, false));
+        let grid = &conversion.grid;
+        let (mut left, mut right) = (0, 0);
+        for y in 0..grid.height {
+            for x in 0..grid.width {
+                let index = ramp_index(grid.cells[(y * grid.width + x) as usize].glyph);
+                if x < grid.width / 2 {
+                    left += index;
+                } else {
+                    right += index;
+                }
+            }
+        }
+        assert!(right > left * 2, "left {left}, right {right}");
+    }
+
+    #[test]
+    fn conversion_is_deterministic() {
+        let a = build_grid(&colorful(80, 60), &settings(30, true));
+        let b = build_grid(&colorful(80, 60), &settings(30, true));
+        assert_eq!(a.auto_bg, b.auto_bg);
+        for (a, b) in a.grid.cells.iter().zip(&b.grid.cells) {
+            assert_eq!((a.glyph, a.color, a.shade), (b.glyph, b.color, b.shade));
+        }
+    }
+
+    #[test]
+    fn auto_background_is_the_same_in_both_modes_and_ignores_explicit_bg() {
+        let image = colorful(80, 60);
+        let flat = build_grid(&image, &settings(30, false)).auto_bg;
+        let two_tone = build_grid(&image, &settings(30, true)).auto_bg;
+        let explicit = build_grid(
+            &image,
+            &ConvertSettings {
+                bg: Some([200, 0, 0]),
+                ..settings(30, true)
+            },
+        )
+        .auto_bg;
+        assert_eq!(flat, two_tone);
+        assert_eq!(flat, explicit);
+    }
+
+    #[test]
+    fn explicit_background_changes_two_tone_glyph_choice() {
+        let image = colorful(80, 60);
+        let glyphs = |bg| -> String {
+            build_grid(
+                &image,
+                &ConvertSettings {
+                    bg,
+                    ..settings(30, true)
+                },
+            )
+            .grid
+            .cells
+            .iter()
+            .map(|cell| cell.glyph)
+            .collect()
+        };
+        assert_ne!(glyphs(Some([0, 0, 0])), glyphs(Some([230, 230, 230])));
+    }
+
+    #[test]
+    fn convert_bytes_rejects_non_images() {
+        assert!(convert_bytes(b"definitely not an image", &settings(10, true)).is_err());
+    }
+
+    #[test]
+    fn convert_bytes_decodes_encoded_images() {
+        let mut png = Vec::new();
+        gradient(40, 20)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let conversion = convert_bytes(&png, &settings(20, false)).unwrap();
+        assert_eq!((conversion.grid.width, conversion.grid.height), (20, 5));
+    }
+
+    // --- ANSI rendering ---
+
+    fn red_hash() -> Cell {
+        Cell {
+            glyph: '#',
+            color: [255, 0, 0],
+            shade: [80, 0, 0],
+        }
+    }
+
+    #[test]
+    fn mono_ansi_is_plain_text() {
+        let out = render_ansi(&uniform_grid(3, 2, red_hash), true, true, [0, 0, 0]);
+        assert_eq!(out, "###\n###\n");
+    }
+
+    #[test]
+    fn ansi_emits_color_only_when_it_changes() {
+        let out = render_ansi(&uniform_grid(4, 2, red_hash), false, false, [0, 0, 0]);
+        assert_eq!(out, "\x1b[38;2;255;0;0m####\x1b[0m\n".repeat(2));
+    }
+
+    #[test]
+    fn ansi_cell_backgrounds_use_blended_shade() {
+        let grid = uniform_grid(2, 1, red_hash);
+        let base = [0, 0, 0];
+        let [r, g, b] = cell_background(&grid.cells[0], base);
+        let out = render_ansi(&grid, false, true, base);
+        assert_eq!(
+            out,
+            format!("\x1b[48;2;{r};{g};{b}m\x1b[38;2;255;0;0m##\x1b[0m\n")
+        );
+    }
+
+    #[test]
+    fn ansi_rows_break_and_reset_per_row() {
+        let grid = Grid {
+            width: 2,
+            height: 2,
+            cells: vec![
+                red_hash(),
+                Cell {
+                    glyph: '.',
+                    color: [0, 0, 255],
+                    shade: [0, 0, 255],
+                },
+                red_hash(),
+                red_hash(),
+            ],
+        };
+        let out = render_ansi(&grid, false, false, [0, 0, 0]);
+        assert_eq!(
+            out,
+            "\x1b[38;2;255;0;0m#\x1b[38;2;0;0;255m.\x1b[0m\n\x1b[38;2;255;0;0m##\x1b[0m\n"
+        );
+    }
+
+    // --- image rendering ---
+
+    fn blank() -> Cell {
+        Cell {
+            glyph: ' ',
+            color: [255, 255, 255],
+            shade: [200, 0, 0],
+        }
+    }
+
+    #[test]
+    fn image_size_is_cells_times_cell_pixels() {
+        let image = render_image(
+            &uniform_grid(7, 3, red_hash),
+            false,
+            Background::Opaque([0, 0, 0]),
+            true,
+        );
+        assert_eq!(
+            image.dimensions(),
+            (7 * CELL_PIXEL_WIDTH, 3 * CELL_PIXEL_HEIGHT)
+        );
+    }
+
+    #[test]
+    fn opaque_background_renders_rgb_and_translucent_renders_rgba() {
+        let grid = uniform_grid(2, 2, red_hash);
+        assert!(matches!(
+            render_image(&grid, false, Background::Opaque([0, 0, 0]), true),
+            DynamicImage::ImageRgb8(_)
+        ));
+        assert!(matches!(
+            render_image(
+                &grid,
+                false,
+                Background::Translucent {
+                    color: [0, 0, 0],
+                    alpha: 0
+                },
+                false
+            ),
+            DynamicImage::ImageRgba8(_)
+        ));
+    }
+
+    #[test]
+    fn blank_cells_show_the_flat_background() {
+        let image = render_image(
+            &uniform_grid(2, 2, blank),
+            false,
+            Background::Opaque([10, 20, 30]),
+            false,
+        )
+        .to_rgb8();
+        assert!(image.pixels().all(|p| p.0 == [10, 20, 30]));
+    }
+
+    #[test]
+    fn blank_cells_become_solid_tiles_with_cell_backgrounds() {
+        let base = [10, 20, 30];
+        let expected = cell_background(&blank(), base);
+        let image = render_image(
+            &uniform_grid(2, 2, blank),
+            false,
+            Background::Opaque(base),
+            true,
+        )
+        .to_rgb8();
+        assert!(image.pixels().all(|p| p.0 == expected));
+    }
+
+    #[test]
+    fn translucent_background_keeps_its_alpha_behind_glyphs() {
+        let image = render_image(
+            &uniform_grid(1, 1, red_hash),
+            false,
+            Background::Translucent {
+                color: [0, 0, 0],
+                alpha: 80,
+            },
+            true,
+        )
+        .to_rgba8();
+        // A corner pixel is outside the glyph's ink.
+        assert_eq!(image.get_pixel(0, 0)[3], 80);
+        // Glyph ink is drawn at the glyph's own opacity, not the
+        // backdrop's (anti-aliasing tops out just shy of 255).
+        assert!(image.pixels().any(|p| p[3] >= 250 && p[0] > 200));
+    }
+
+    #[test]
+    fn fully_transparent_background_leaves_only_glyphs() {
+        let image = render_image(
+            &uniform_grid(2, 1, blank),
+            false,
+            Background::Translucent {
+                color: [0, 0, 0],
+                alpha: 0,
+            },
+            false,
+        )
+        .to_rgba8();
+        assert!(image.pixels().all(|p| p[3] == 0));
+    }
+
+    #[test]
+    fn mono_images_draw_white_glyphs_and_skip_cell_backgrounds() {
+        let image = render_image(
+            &uniform_grid(1, 1, red_hash),
+            true,
+            Background::Opaque([0, 0, 0]),
+            true,
+        )
+        .to_rgb8();
+        assert_eq!(image.get_pixel(0, 0).0, [0, 0, 0]);
+        assert!(image.pixels().all(|p| p[0] == p[1] && p[1] == p[2]));
+        assert!(image.pixels().any(|p| p[0] > 200));
+    }
+
+    #[test]
+    #[should_panic]
+    fn renderers_reject_grids_with_too_few_cells() {
+        let grid = Grid {
+            width: 3,
+            height: 3,
+            cells: vec![red_hash()],
+        };
+        render_ansi(&grid, false, false, [0, 0, 0]);
     }
 }

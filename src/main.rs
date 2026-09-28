@@ -1,7 +1,8 @@
+#[cfg(feature = "generate")]
 mod openai;
-mod pipeline;
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand};
+use halftone::pipeline;
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
@@ -18,6 +19,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Generate an image from a text prompt, then convert it to ASCII art.
+    #[cfg(feature = "generate")]
     Generate {
         /// The prompt describing the image to generate. Omit this and use
         /// `--prompt-file` instead to read the prompt from a file.
@@ -55,13 +57,15 @@ enum Command {
     },
 }
 
-#[derive(Clone, Copy, ValueEnum)]
+#[cfg(feature = "generate")]
+#[derive(Clone, Copy, clap::ValueEnum)]
 enum ImageShape {
     Square,
     Landscape,
     Portrait,
 }
 
+#[cfg(feature = "generate")]
 impl ImageShape {
     /// gpt-image-1 only accepts these three exact size strings (dall-e-3's
     /// 1792x1024/1024x1792 no longer apply now that it's been shut down).
@@ -77,7 +81,7 @@ impl ImageShape {
 #[derive(Args)]
 struct ConvertOptions {
     /// Output width, in characters.
-    #[arg(long, default_value_t = 80)]
+    #[arg(long, default_value_t = 80, value_parser = clap::value_parser!(u32).range(1..))]
     width: u32,
 
     /// Write output to this file instead of stdout.
@@ -154,19 +158,23 @@ fn parse_bg(bg: &str) -> Result<BgSpec, String> {
                 "invalid color '{spec}': expected 'auto', 'transparent', or 6 hex digits, like 1e2b30"
             ));
         }
-        let channel = |range| {
-            u8::from_str_radix(&hex[range], 16)
-                .map_err(|_| format!("invalid color '{spec}': not valid hex"))
-        };
-        Some([channel(0..2)?, channel(2..4)?, channel(4..6)?])
+        // Checked up front rather than left to `from_str_radix`, which
+        // accepts a leading `+` (so `+1+2+3` would parse), and because
+        // slicing by byte range below panics on a non-ASCII character.
+        if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(format!("invalid color '{spec}': not valid hex"));
+        }
+        let channel =
+            |range| u8::from_str_radix(&hex[range], 16).expect("validated as ASCII hex above");
+        Some([channel(0..2), channel(2..4), channel(4..6)])
     };
 
     Ok(BgSpec { color, alpha })
 }
 
-/// Resolves a parsed `--bg` against a converted grid, filling in `auto`.
-fn resolve_bg(bg: &BgSpec, grid: &pipeline::Grid) -> pipeline::Background {
-    let color = bg.color.unwrap_or_else(|| pipeline::auto_background(grid));
+/// Resolves a parsed `--bg` against a converted image, filling in `auto`.
+fn resolve_bg(bg: &BgSpec, auto_bg: [u8; 3]) -> pipeline::Background {
+    let color = bg.color.unwrap_or(auto_bg);
     if bg.alpha == 255 {
         pipeline::Background::Opaque(color)
     } else {
@@ -225,6 +233,7 @@ fn supports_alpha(path: &Path) -> bool {
 /// (clap's `conflicts_with`/`required_unless_present` guarantee exactly one
 /// is `Some`). File contents are trimmed since editors routinely add a
 /// trailing newline that shouldn't become part of the prompt.
+#[cfg(feature = "generate")]
 fn resolve_prompt(prompt: Option<String>, prompt_file: Option<&Path>) -> Result<String, String> {
     if let Some(path) = prompt_file {
         let contents = std::fs::read_to_string(path)
@@ -243,6 +252,7 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
+        #[cfg(feature = "generate")]
         Command::Generate {
             prompt,
             prompt_file,
@@ -286,9 +296,9 @@ fn main() {
 
                 eprintln!("Converting to ASCII art...");
                 match pipeline::convert_bytes(&bytes, &options.settings()) {
-                    Ok(grid) => {
+                    Ok(conversion) => {
                         let out = options.out.as_deref().map(|p| indexed_path(p, i, total));
-                        write_output(&grid, &options, out.as_deref())
+                        write_output(&conversion, &options, out.as_deref())
                     }
                     Err(err) => {
                         eprintln!("failed to convert generated image: {err}");
@@ -301,7 +311,7 @@ fn main() {
             image_path,
             options,
         } => match pipeline::convert_image(&image_path, &options.settings()) {
-            Ok(grid) => write_output(&grid, &options, options.out.as_deref()),
+            Ok(conversion) => write_output(&conversion, &options, options.out.as_deref()),
             Err(err) => {
                 eprintln!("failed to convert {}: {}", image_path.display(), err);
                 std::process::exit(1);
@@ -314,6 +324,7 @@ fn main() {
 /// `--count` images each get their own file instead of every image after the
 /// first overwriting the last. A single-image run (`total <= 1`) returns
 /// `path` unchanged, preserving today's filenames for existing scripts.
+#[cfg(feature = "generate")]
 fn indexed_path(path: &Path, index: usize, total: usize) -> PathBuf {
     if total <= 1 {
         return path.to_path_buf();
@@ -343,9 +354,10 @@ fn is_image_path(path: &Path) -> bool {
     )
 }
 
-fn write_output(grid: &pipeline::Grid, options: &ConvertOptions, out: Option<&Path>) {
+fn write_output(conversion: &pipeline::Conversion, options: &ConvertOptions, out: Option<&Path>) {
+    let grid = &conversion.grid;
     let mono = options.mono;
-    let bg = resolve_bg(&options.bg_spec(), grid);
+    let bg = resolve_bg(&options.bg_spec(), conversion.auto_bg);
     let base = match bg {
         pipeline::Background::Opaque(color) | pipeline::Background::Translucent { color, .. } => {
             color
@@ -372,5 +384,234 @@ fn write_output(grid: &pipeline::Grid, options: &ConvertOptions, out: Option<&Pa
     } else if let Err(err) = std::fs::write(path, &art) {
         eprintln!("failed to write {}: {}", path.display(), err);
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    fn convert_options(args: &[&str]) -> ConvertOptions {
+        let cli = Cli::try_parse_from(
+            ["halftone", "convert", "image.png"]
+                .iter()
+                .chain(args)
+                .copied(),
+        )
+        .unwrap();
+        match cli.command {
+            Command::Convert { options, .. } => options,
+            #[cfg(feature = "generate")]
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn cli_definition_is_valid() {
+        Cli::command().debug_assert();
+    }
+
+    // --- --bg parsing ---
+
+    fn bg(value: &str) -> (Option<[u8; 3]>, u8) {
+        let spec = parse_bg(value).unwrap();
+        (spec.color, spec.alpha)
+    }
+
+    #[test]
+    fn bg_auto_and_transparent() {
+        assert_eq!(bg("auto"), (None, 255));
+        assert_eq!(bg("AUTO"), (None, 255));
+        assert_eq!(bg("transparent"), (Some([0, 0, 0]), 0));
+        assert_eq!(bg("Transparent"), (Some([0, 0, 0]), 0));
+    }
+
+    #[test]
+    fn bg_hex_colors() {
+        assert_eq!(bg("1e2b30"), (Some([0x1e, 0x2b, 0x30]), 255));
+        assert_eq!(bg("#1e2b30"), (Some([0x1e, 0x2b, 0x30]), 255));
+        assert_eq!(bg("FFaa00"), (Some([0xff, 0xaa, 0x00]), 255));
+    }
+
+    #[test]
+    fn bg_alpha_suffix() {
+        assert_eq!(bg("auto@128"), (None, 128));
+        assert_eq!(bg("1e2b30@0"), (Some([0x1e, 0x2b, 0x30]), 0));
+        assert_eq!(bg("#1e2b30@255"), (Some([0x1e, 0x2b, 0x30]), 255));
+    }
+
+    #[test]
+    fn bg_rejects_malformed_values() {
+        for value in [
+            "",
+            "black",
+            "1e2b3",
+            "1e2b300",
+            "#12345",
+            "zzzzzz",
+            "+1+2+3",
+            "aé123",
+            "ééé",
+            "auto@",
+            "auto@256",
+            "auto@-1",
+            "auto@x",
+            "1e2b30@80@80",
+            "transparent@80",
+        ] {
+            assert!(parse_bg(value).is_err(), "{value:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn resolve_bg_fills_in_auto_and_picks_opacity() {
+        let auto = [1, 2, 3];
+        assert!(matches!(
+            resolve_bg(&parse_bg("auto").unwrap(), auto),
+            pipeline::Background::Opaque([1, 2, 3])
+        ));
+        assert!(matches!(
+            resolve_bg(&parse_bg("aabbcc").unwrap(), auto),
+            pipeline::Background::Opaque([0xaa, 0xbb, 0xcc])
+        ));
+        assert!(matches!(
+            resolve_bg(&parse_bg("auto@10").unwrap(), auto),
+            pipeline::Background::Translucent {
+                color: [1, 2, 3],
+                alpha: 10
+            }
+        ));
+    }
+
+    // --- option interplay ---
+
+    #[test]
+    fn cell_backgrounds_are_on_by_default() {
+        assert!(convert_options(&[]).cell_bg());
+        assert!(convert_options(&["--bg", "1e2b30"]).cell_bg());
+        assert!(convert_options(&["--bg", "auto@128"]).cell_bg());
+    }
+
+    #[test]
+    fn cell_backgrounds_turn_off_for_flat_mono_and_transparent() {
+        assert!(!convert_options(&["--flat-bg"]).cell_bg());
+        assert!(!convert_options(&["--mono"]).cell_bg());
+        assert!(!convert_options(&["--bg", "transparent"]).cell_bg());
+        assert!(!convert_options(&["--bg", "auto@0"]).cell_bg());
+    }
+
+    #[test]
+    fn settings_carry_width_and_explicit_bg() {
+        let settings = convert_options(&["--width", "42", "--bg", "#102030"]).settings();
+        assert_eq!(settings.width, 42);
+        assert_eq!(settings.bg, Some([0x10, 0x20, 0x30]));
+        assert!(settings.cell_bg);
+        assert_eq!(convert_options(&[]).settings().bg, None);
+    }
+
+    // --- output paths ---
+
+    #[test]
+    fn image_paths_by_extension() {
+        for path in [
+            "a.png", "a.PNG", "a.jpg", "a.jpeg", "a.bmp", "a.tiff", "a.webp",
+        ] {
+            assert!(is_image_path(Path::new(path)), "{path}");
+        }
+        for path in ["a.txt", "a.ans", "a", "png"] {
+            assert!(!is_image_path(Path::new(path)), "{path}");
+        }
+    }
+
+    #[test]
+    fn only_png_supports_alpha() {
+        assert!(supports_alpha(Path::new("a.png")));
+        assert!(supports_alpha(Path::new("a.Png")));
+        assert!(!supports_alpha(Path::new("a.jpg")));
+        assert!(!supports_alpha(Path::new("a.webp")));
+        assert!(!supports_alpha(Path::new("a")));
+    }
+
+    #[cfg(feature = "generate")]
+    #[test]
+    fn indexed_path_only_suffixes_batches() {
+        let path = Path::new("out/art.png");
+        assert_eq!(indexed_path(path, 0, 1), PathBuf::from("out/art.png"));
+        assert_eq!(indexed_path(path, 0, 3), PathBuf::from("out/art-1.png"));
+        assert_eq!(indexed_path(path, 2, 3), PathBuf::from("out/art-3.png"));
+        assert_eq!(indexed_path(Path::new("art"), 1, 2), PathBuf::from("art-2"));
+        assert_eq!(
+            indexed_path(Path::new("art.tar.gz"), 0, 2),
+            PathBuf::from("art.tar-1.gz")
+        );
+    }
+
+    // --- generate ---
+
+    #[cfg(feature = "generate")]
+    fn generate_args(args: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(["halftone", "generate"].iter().chain(args).copied())
+    }
+
+    #[cfg(feature = "generate")]
+    #[test]
+    fn generate_needs_exactly_one_prompt_source() {
+        assert!(generate_args(&["a dragon"]).is_ok());
+        assert!(generate_args(&["--prompt-file", "p.txt"]).is_ok());
+        assert!(generate_args(&[]).is_err());
+        assert!(generate_args(&["a dragon", "--prompt-file", "p.txt"]).is_err());
+    }
+
+    #[cfg(feature = "generate")]
+    #[test]
+    fn generate_count_is_bounded() {
+        assert!(generate_args(&["x", "-n", "1"]).is_ok());
+        assert!(generate_args(&["x", "-n", "10"]).is_ok());
+        assert!(generate_args(&["x", "-n", "0"]).is_err());
+        assert!(generate_args(&["x", "-n", "11"]).is_err());
+    }
+
+    #[cfg(feature = "generate")]
+    #[test]
+    fn image_shapes_map_to_openai_sizes() {
+        assert_eq!(ImageShape::Square.as_openai_size(), "1024x1024");
+        assert_eq!(ImageShape::Landscape.as_openai_size(), "1536x1024");
+        assert_eq!(ImageShape::Portrait.as_openai_size(), "1024x1536");
+    }
+
+    #[cfg(feature = "generate")]
+    fn temp_prompt_file(name: &str, contents: &str) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("halftone-test-{}-{name}.txt", std::process::id()));
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    #[cfg(feature = "generate")]
+    #[test]
+    fn prompt_comes_from_argument_or_trimmed_file() {
+        assert_eq!(
+            resolve_prompt(Some("a dragon".into()), None).unwrap(),
+            "a dragon"
+        );
+        let path = temp_prompt_file("trimmed", "\n  a castle at dusk\n\n");
+        assert_eq!(
+            resolve_prompt(None, Some(&path)).unwrap(),
+            "a castle at dusk"
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(feature = "generate")]
+    #[test]
+    fn prompt_file_must_exist_and_have_content() {
+        let path = temp_prompt_file("blank", " \n\t\n");
+        let err = resolve_prompt(None, Some(&path)).unwrap_err();
+        assert!(err.contains("is empty"), "{err}");
+        std::fs::remove_file(&path).unwrap();
+
+        let err = resolve_prompt(None, Some(&path)).unwrap_err();
+        assert!(err.contains("failed to read prompt file"), "{err}");
     }
 }

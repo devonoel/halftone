@@ -238,3 +238,121 @@ fn decode_image(client: &reqwest::blocking::Client, image: ImageData) -> Result<
 
     Err("OpenAI response contained neither b64_json nor url".to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_limit_from_rate_limit_message() {
+        let message = r#"{"error":{"message":"Rate limit reached for gpt-image-1 in organization org-abc on input-images per min: Limit 5, Requested 10. Please try again in 12s."}}"#;
+        assert_eq!(parse_rate_limit(message), Some(5));
+        assert_eq!(parse_rate_limit("Limit 250, Requested 300"), Some(250));
+    }
+
+    #[test]
+    fn rate_limit_without_a_limit_is_none() {
+        assert_eq!(parse_rate_limit(""), None);
+        assert_eq!(parse_rate_limit("Too many requests"), None);
+        assert_eq!(parse_rate_limit("Limit reached"), None);
+    }
+
+    #[test]
+    fn request_body_matches_the_images_api() {
+        let body = serde_json::to_value(ImageRequest {
+            model: "gpt-image-1",
+            prompt: "a dragon",
+            n: 3,
+            size: "1024x1536",
+            quality: "low",
+        })
+        .unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "model": "gpt-image-1",
+                "prompt": "a dragon",
+                "n": 3,
+                "size": "1024x1536",
+                "quality": "low",
+            })
+        );
+    }
+
+    #[test]
+    fn response_accepts_either_image_field() {
+        let parsed: ImageResponse = serde_json::from_str(
+            r#"{"created": 1, "data": [{"b64_json": "aGk="}, {"url": "https://example.com/a.png"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.data[0].b64_json.as_deref(), Some("aGk="));
+        assert_eq!(parsed.data[0].url, None);
+        assert_eq!(
+            parsed.data[1].url.as_deref(),
+            Some("https://example.com/a.png")
+        );
+    }
+
+    #[test]
+    fn decodes_base64_image_data() {
+        let client = reqwest::blocking::Client::new();
+        let image = ImageData {
+            b64_json: Some("aGVsbG8=".into()),
+            url: None,
+        };
+        assert_eq!(decode_image(&client, image).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn reports_bad_or_missing_image_data() {
+        let client = reqwest::blocking::Client::new();
+        let bad = ImageData {
+            b64_json: Some("not base64!".into()),
+            url: None,
+        };
+        assert!(
+            decode_image(&client, bad)
+                .unwrap_err()
+                .contains("failed to decode base64")
+        );
+        let empty = ImageData {
+            b64_json: None,
+            url: None,
+        };
+        assert!(
+            decode_image(&client, empty)
+                .unwrap_err()
+                .contains("neither b64_json nor url")
+        );
+    }
+
+    #[derive(Debug)]
+    struct Chained(&'static str, Option<Box<Chained>>);
+
+    impl std::fmt::Display for Chained {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+
+    impl Error for Chained {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            self.1.as_deref().map(|e| e as _)
+        }
+    }
+
+    #[test]
+    fn error_descriptions_include_every_cause() {
+        let err = Chained(
+            "error sending request",
+            Some(Box::new(Chained(
+                "connection reset",
+                Some(Box::new(Chained("os error 54", None))),
+            ))),
+        );
+        assert_eq!(
+            describe_error(&err),
+            "error sending request\n  caused by: connection reset\n  caused by: os error 54"
+        );
+    }
+}
