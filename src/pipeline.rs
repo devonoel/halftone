@@ -62,6 +62,7 @@ const FONT_BYTES: &[u8] = include_bytes!("../assets/JetBrainsMono-Bold.ttf");
 const CELL_PIXEL_WIDTH: u32 = 10;
 const CELL_PIXEL_HEIGHT: u32 = 20;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cell {
     pub glyph: char,
     pub color: [u8; 3],
@@ -231,6 +232,7 @@ fn hsv_to_rgb(hue: f64, saturation: f64, value: f64) -> [u8; 3] {
 /// A grid of glyph cells, ready for `render_ansi`/`render_image`. `cells` is
 /// row-major and must hold exactly `width * height` cells; the renderers
 /// index it by position and panic otherwise.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Grid {
     pub width: u32,
     pub height: u32,
@@ -239,6 +241,7 @@ pub struct Grid {
 
 /// The result of converting an image: its grid, plus the backdrop color
 /// derived from the source image for `--bg auto`.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Conversion {
     pub grid: Grid,
     /// A dark background tinted toward the image's own average color (its
@@ -248,6 +251,7 @@ pub struct Conversion {
     pub auto_bg: [u8; 3],
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConvertSettings {
     /// Output width, in characters.
     pub width: u32,
@@ -787,6 +791,7 @@ fn average_background(colors: &[[u8; 3]]) -> [u8; 3] {
 /// all. `Opaque` is kept as its own variant rather than folded into
 /// `Translucent { alpha: 255, .. }` so the common case still renders onto a
 /// plain `RgbImage` instead of carrying a needless all-255 alpha channel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Background {
     Opaque([u8; 3]),
     Translucent { color: [u8; 3], alpha: u8 },
