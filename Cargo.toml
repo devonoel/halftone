@@ -1,6 +1,6 @@
 [package]
 name = "halftone"
-version = "0.5.1"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Turn images into ANSI/ASCII splash art, right in your terminal"
@@ -18,7 +18,8 @@ default = ["cli", "generate"]
 cli = ["dep:clap"]
 # `halftone generate`: prompt-to-image through OpenAI's API. Pulls in an HTTP
 # client and TLS stack that the conversion/rendering library never touches.
-generate = ["cli", "dep:base64", "dep:reqwest", "dep:serde", "dep:serde_json"]
+# Also available to library users (`halftone::openai`), without the CLI.
+generate = ["dep:base64", "dep:reqwest", "dep:serde", "dep:serde_json"]
 
 [[bin]]
 name = "halftone"
@@ -35,6 +36,6 @@ base64 = { version = "0.22.1", optional = true }
 clap = { version = "4.6.1", features = ["derive"], optional = true }
 image = "0.25.10"
 imageproc = { version = "0.27.0", default-features = false, features = ["text"] }
-reqwest = { version = "0.13.4", features = ["blocking", "json"], optional = true }
+reqwest = { version = "0.13.4", features = ["blocking", "json", "multipart"], optional = true }
 serde = { version = "1.0.228", features = ["derive"], optional = true }
 serde_json = { version = "1.0.150", optional = true }

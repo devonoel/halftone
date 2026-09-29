@@ -24,6 +24,9 @@ jobs:
       # The CLI without `generate`.
       - run: cargo test --no-default-features --features cli --verbose
       - run: cargo clippy --all-targets --no-default-features --features cli -- -D warnings
+      # The library with image generation, as a dependent crate would use it.
+      - run: cargo test --no-default-features --features generate --verbose
+      - run: cargo clippy --all-targets --no-default-features --features generate -- -D warnings
 
   # Publishes to crates.io and tags the release whenever a push to main
   # carries a Cargo.toml version with no matching git tag yet -- this only

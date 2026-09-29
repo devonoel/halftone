@@ -1,7 +1,6 @@
-#[cfg(feature = "generate")]
-mod openai;
-
 use clap::{Args, Parser, Subcommand};
+#[cfg(feature = "generate")]
+use halftone::openai;
 use halftone::pipeline;
 use std::path::{Path, PathBuf};
 
@@ -47,6 +46,17 @@ enum Command {
         /// its own path instead of overwriting the last one.
         #[arg(short = 'n', long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=10))]
         count: u32,
+        /// An image to work from -- a sketch, a layout, a photo -- which the
+        /// model repaints following the prompt, keeping its composition.
+        #[arg(long)]
+        reference: Option<PathBuf>,
+        /// OpenAI image model.
+        #[arg(long, default_value = openai::DEFAULT_MODEL)]
+        model: String,
+        /// Image quality. Higher costs more; the gpt-image-2.5 models also
+        /// accept `xhigh` and `max`.
+        #[arg(long, default_value = "low", value_parser = ["low", "medium", "high", "xhigh", "max", "auto"])]
+        quality: String,
     },
     /// Convert an existing image file to ASCII art.
     Convert {
@@ -260,6 +270,9 @@ fn main() {
             size,
             save_image,
             count,
+            reference,
+            model,
+            quality,
         } => {
             let prompt = match resolve_prompt(prompt, prompt_file.as_deref()) {
                 Ok(prompt) => prompt,
@@ -268,7 +281,21 @@ fn main() {
                     std::process::exit(1);
                 }
             };
-            let images = match openai::generate_images(&prompt, size.as_openai_size(), count) {
+            let reference = match reference.as_deref().map(std::fs::read).transpose() {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    eprintln!("failed to read the reference image: {err}");
+                    std::process::exit(1);
+                }
+            };
+            let request = openai::Options {
+                model: &model,
+                size: size.as_openai_size(),
+                quality: &quality,
+                count,
+                reference: reference.as_deref(),
+            };
+            let images = match openai::generate(&prompt, &request) {
                 Ok(images) => images,
                 Err(err) => {
                     eprintln!("{err}");
@@ -561,6 +588,39 @@ mod tests {
         assert!(generate_args(&["--prompt-file", "p.txt"]).is_ok());
         assert!(generate_args(&[]).is_err());
         assert!(generate_args(&["a dragon", "--prompt-file", "p.txt"]).is_err());
+    }
+
+    #[cfg(feature = "generate")]
+    #[test]
+    fn generate_takes_a_reference_model_and_quality() {
+        let Command::Generate {
+            reference,
+            model,
+            quality,
+            ..
+        } = generate_args(&[
+            "x",
+            "--reference",
+            "sketch.png",
+            "--model",
+            "gpt-image-2.5-sunburst",
+            "--quality",
+            "high",
+        ])
+        .unwrap()
+        .command
+        else {
+            unreachable!()
+        };
+        assert_eq!(reference, Some(PathBuf::from("sketch.png")));
+        assert_eq!(model, "gpt-image-2.5-sunburst");
+        assert_eq!(quality, "high");
+        assert!(generate_args(&["x", "--quality", "ultra"]).is_err());
+        let Command::Generate { model, quality, .. } = generate_args(&["x"]).unwrap().command
+        else {
+            unreachable!()
+        };
+        assert_eq!((model.as_str(), quality.as_str()), ("gpt-image-1", "low"));
     }
 
     #[cfg(feature = "generate")]

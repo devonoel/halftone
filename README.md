@@ -112,6 +112,17 @@ Any plain text file works (`.txt`, `.md`, or no extension at all) —
 leading/trailing whitespace is trimmed. `--prompt-file` replaces the
 positional prompt argument; pass one or the other, not both.
 
+### Repaint a reference image
+
+```sh
+halftone generate "a hand-painted top-down fantasy map of this layout" \
+  --reference layout.png --model gpt-image-2.5-sunburst --quality medium
+```
+
+`--reference` sends an image along with the prompt, and the model repaints
+it, keeping its composition: a rough sketch, a map layout, or a photo to
+restyle.
+
 ### Options
 
 Available on both `convert` and `generate`:
@@ -173,6 +184,9 @@ guaranteed backdrop.
 | `--save-image <path>`  | Also save the raw generated image, before conversion       | —        |
 | `-n, --count <N>`      | Generate this many images from the same prompt (1-10)      | `1`      |
 | `--prompt-file <path>` | Read the prompt from a file instead of the positional argument | —    |
+| `--reference <path>`   | An image for the model to repaint, keeping its composition | —        |
+| `--model <name>`       | OpenAI image model                                         | `gpt-image-1` |
+| `--quality <level>`    | `low`, `medium`, `high`, or `auto` (`xhigh`/`max` on gpt-image-2.5 models) | `low` |
 
 `--count` asks OpenAI for all `N` images in a single request rather than
 making `N` separate calls. When `--count` is greater than 1, `--out` and
@@ -204,6 +218,12 @@ rather than failing the whole command.
 5. If `--out` points at an image file, the same glyph grid is instead
    rasterized onto a canvas using a bundled copy of JetBrains Mono, one
    fixed-size cell per glyph, rather than being formatted as ANSI text.
+
+## As a library
+
+Add halftone with `default-features = false` to use the conversion and
+rendering pipeline (`halftone::pipeline`) without the CLI. Enable the
+`generate` feature too to call OpenAI's image API (`halftone::openai`).
 
 ## Requirements
 

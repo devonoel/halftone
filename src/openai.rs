@@ -4,7 +4,64 @@ use std::error::Error;
 use std::thread;
 use std::time::Duration;
 
-const API_URL: &str = "https://api.openai.com/v1/images/generations";
+const GENERATIONS_URL: &str = "https://api.openai.com/v1/images/generations";
+const EDITS_URL: &str = "https://api.openai.com/v1/images/edits";
+
+/// The model `halftone generate` uses unless told otherwise.
+pub const DEFAULT_MODEL: &str = "gpt-image-1";
+
+/// What to generate, beyond the prompt.
+pub struct Options<'a> {
+    pub model: &'a str,
+    /// "1024x1024", "1536x1024", "1024x1536", or (on models that allow it)
+    /// any size whose sides are multiples of 16.
+    pub size: &'a str,
+    /// "low", "medium", "high", or "auto"; the gpt-image-2.5 models also
+    /// take "xhigh" and "max".
+    pub quality: &'a str,
+    pub count: u32,
+    /// An image to work from. With one, the request goes to the edits
+    /// endpoint and the model repaints the reference following the prompt,
+    /// keeping its composition.
+    pub reference: Option<&'a [u8]>,
+}
+
+impl Default for Options<'_> {
+    fn default() -> Self {
+        Options {
+            model: DEFAULT_MODEL,
+            size: "1024x1024",
+            // The output usually gets reduced to a halftone dot pattern, so
+            // the fine detail higher qualities pay for is mostly wasted --
+            // "low" cuts the per-image cost roughly 4-15x.
+            quality: "low",
+            count: 1,
+            reference: None,
+        }
+    }
+}
+
+/// Whether a model takes `input_fidelity`, which makes edits follow the
+/// reference more closely. Only the gpt-image-1 family does; the newer
+/// models reject it outright.
+fn supports_input_fidelity(model: &str) -> bool {
+    model.starts_with("gpt-image-1") && !model.contains("mini")
+}
+
+/// The text fields of an edit request.
+fn edit_fields(prompt: &str, options: &Options, n: u32) -> Vec<(&'static str, String)> {
+    let mut fields = vec![
+        ("model", options.model.to_string()),
+        ("prompt", prompt.to_string()),
+        ("n", n.to_string()),
+        ("size", options.size.to_string()),
+        ("quality", options.quality.to_string()),
+    ];
+    if supports_input_fidelity(options.model) {
+        fields.push(("input_fidelity", "high".to_string()));
+    }
+    fields
+}
 
 // How long to wait before retrying a request that got rate limited at a
 // batch size the account should be able to handle (i.e. not the "shrink the
@@ -65,11 +122,9 @@ enum BatchError {
     Other(String),
 }
 
-/// Generates `count` image(s) from `prompt` via OpenAI's gpt-image-1 and
-/// returns the raw image bytes for each. `size` must be one of the sizes
-/// gpt-image-1 accepts: "1024x1024", "1536x1024", or "1024x1536". Always
-/// requested at "low" quality -- see the comment on `quality` in
-/// `request_batch` for why.
+/// Generates `options.count` image(s) from `prompt` -- repainting
+/// `options.reference` if there is one -- and returns the raw image bytes
+/// for each.
 ///
 /// Requesting `count` up front (gpt-image-1's own `n` parameter) rather than
 /// making `count` separate calls gets every variation from a single round
@@ -81,12 +136,15 @@ enum BatchError {
 /// outright, and a request rejected at a size the account should support is
 /// retried after a short wait in case the per-minute window just needs to
 /// partially refill.
-pub fn generate_images(prompt: &str, size: &str, count: u32) -> Result<Vec<Vec<u8>>, String> {
+pub fn generate(prompt: &str, options: &Options) -> Result<Vec<Vec<u8>>, String> {
+    let count = options.count.max(1);
+    let (model, size) = (options.model, options.size);
     let api_key = std::env::var("OPENAI_API_KEY")
         .map_err(|_| "OPENAI_API_KEY environment variable is not set".to_string())?;
 
     let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(120))
+        // High-quality edits can take a few minutes.
+        .timeout(Duration::from_secs(600))
         .build()
         .map_err(|err| format!("failed to build HTTP client: {}", describe_error(&err)))?;
 
@@ -99,11 +157,11 @@ pub fn generate_images(prompt: &str, size: &str, count: u32) -> Result<Vec<Vec<u
         let this_batch = remaining.min(batch_cap);
         let plural = if this_batch == 1 { "image" } else { "images" };
         eprintln!(
-            "Requesting {this_batch} {plural} from OpenAI (gpt-image-1, size {size}, {} of {count} total)... this can take up to a minute or so.",
+            "Requesting {this_batch} {plural} from OpenAI ({model}, size {size}, {} of {count} total)... this can take a minute or more.",
             count - remaining + 1
         );
 
-        match request_batch(&client, &api_key, prompt, size, this_batch) {
+        match request_batch(&client, &api_key, prompt, options, this_batch) {
             Ok(data) => {
                 images.extend(data);
                 remaining -= this_batch;
@@ -149,31 +207,39 @@ fn request_batch(
     client: &reqwest::blocking::Client,
     api_key: &str,
     prompt: &str,
-    size: &str,
+    options: &Options,
     n: u32,
 ) -> Result<Vec<ImageData>, BatchError> {
-    let body = ImageRequest {
-        model: "gpt-image-1",
-        prompt,
-        n,
-        size,
-        // The output gets reduced to a halftone dot pattern anyway, so the
-        // fine detail "medium"/"high" pays for is wasted -- "low" cuts the
-        // per-image cost roughly 4-15x with no visible difference downstream.
-        quality: "low",
+    let request = match options.reference {
+        // Edits are multipart: the reference image plus text fields.
+        Some(reference) => {
+            let image = reqwest::blocking::multipart::Part::bytes(reference.to_vec())
+                .file_name("reference.png")
+                .mime_str("image/png")
+                .map_err(|err| BatchError::Other(format!("bad reference image: {err}")))?;
+            let form = edit_fields(prompt, options, n)
+                .into_iter()
+                .fold(reqwest::blocking::multipart::Form::new(), |form, (k, v)| {
+                    form.text(k, v)
+                })
+                .part("image[]", image);
+            client.post(EDITS_URL).multipart(form)
+        }
+        None => client.post(GENERATIONS_URL).json(&ImageRequest {
+            model: options.model,
+            prompt,
+            n,
+            size: options.size,
+            quality: options.quality,
+        }),
     };
 
-    let response = client
-        .post(API_URL)
-        .bearer_auth(api_key)
-        .json(&body)
-        .send()
-        .map_err(|err| {
-            BatchError::Other(format!(
-                "request to OpenAI failed: {}",
-                describe_error(&err)
-            ))
-        })?;
+    let response = request.bearer_auth(api_key).send().map_err(|err| {
+        BatchError::Other(format!(
+            "request to OpenAI failed: {}",
+            describe_error(&err)
+        ))
+    })?;
 
     let status = response.status();
     if !status.is_success() {
@@ -277,6 +343,55 @@ mod tests {
                 "quality": "low",
             })
         );
+    }
+
+    #[test]
+    fn only_the_gpt_image_1_family_gets_input_fidelity() {
+        assert!(supports_input_fidelity("gpt-image-1"));
+        assert!(!supports_input_fidelity("gpt-image-1-mini"));
+        assert!(!supports_input_fidelity("gpt-image-2"));
+        assert!(!supports_input_fidelity("gpt-image-2.5-sunburst"));
+    }
+
+    #[test]
+    fn edit_requests_carry_the_options() {
+        let options = Options {
+            model: "gpt-image-2.5-sunburst",
+            size: "1536x768",
+            quality: "medium",
+            count: 1,
+            reference: Some(b"png"),
+        };
+        let fields = edit_fields("paint it", &options, 2);
+        let get = |k| {
+            fields
+                .iter()
+                .find(|(f, _)| *f == k)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(get("model"), Some("gpt-image-2.5-sunburst"));
+        assert_eq!(get("prompt"), Some("paint it"));
+        assert_eq!(get("n"), Some("2"));
+        assert_eq!(get("size"), Some("1536x768"));
+        assert_eq!(get("quality"), Some("medium"));
+        assert_eq!(get("input_fidelity"), None);
+
+        let old = Options {
+            model: "gpt-image-1",
+            ..options
+        };
+        let fields = edit_fields("paint it", &old, 1);
+        assert!(fields.contains(&("input_fidelity", "high".to_string())));
+    }
+
+    #[test]
+    fn defaults_keep_generation_cheap() {
+        let options = Options::default();
+        assert_eq!(
+            (options.model, options.quality, options.count),
+            ("gpt-image-1", "low", 1)
+        );
+        assert!(options.reference.is_none());
     }
 
     #[test]
