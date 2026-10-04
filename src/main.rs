@@ -125,6 +125,28 @@ struct ConvertOptions {
     /// single-color-per-cell look. Implied by `--mono` and `--bg transparent`.
     #[arg(long)]
     flat_bg: bool,
+
+    /// How brightness and color are mapped: `equalized` stretches the
+    /// image's own brightness range and boosts color, which rescues dim or
+    /// moody images; `natural` keeps the source's own brightness and colors,
+    /// which reads better for bright, even artwork like maps.
+    #[arg(long, value_enum, default_value = "equalized")]
+    tone: ToneArg,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum ToneArg {
+    Equalized,
+    Natural,
+}
+
+impl From<ToneArg> for pipeline::Tone {
+    fn from(tone: ToneArg) -> Self {
+        match tone {
+            ToneArg::Equalized => pipeline::Tone::Equalized,
+            ToneArg::Natural => pipeline::Tone::Natural,
+        }
+    }
 }
 
 /// A parsed `--bg` value: the color (`None` for `auto`, which can only be
@@ -218,6 +240,7 @@ impl ConvertOptions {
             width: self.width,
             cell_bg: self.cell_bg(),
             bg: self.bg_spec().color,
+            tone: self.tone.into(),
         }
     }
 }
@@ -294,6 +317,7 @@ fn main() {
                 quality: &quality,
                 count,
                 reference: reference.as_deref(),
+                extra_references: &[],
             };
             let images = match openai::generate(&prompt, &request) {
                 Ok(images) => images,

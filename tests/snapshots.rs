@@ -99,6 +99,7 @@ fn render(case: &Case) -> (String, image::DynamicImage) {
             width: case.width,
             cell_bg: case.cell_bg,
             bg: case.bg,
+            tone: Default::default(),
         },
     )
     .expect("fixture converts");

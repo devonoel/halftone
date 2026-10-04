@@ -251,6 +251,22 @@ pub struct Conversion {
     pub auto_bg: [u8; 3],
 }
 
+/// How a source's brightness and color are mapped onto the glyph ramp.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Tone {
+    /// Histogram-equalized: glyphs and colors both follow each cell's place
+    /// in the image's own brightness distribution, lifted by COLOR_GAMMA and
+    /// with saturation boosted by SATURATION_GAMMA. Rescues dim, moody, or
+    /// narrow-midtone sources (portraits, night scenes).
+    #[default]
+    Equalized,
+    /// The source's own brightness picks the glyph, and its own colors are
+    /// painted as-is. For bright, even artwork -- maps, diagrams, daylight
+    /// scenes -- where equalization would stretch a large flat area's tiny
+    /// variations into noise and push everything darker than it toward black.
+    Natural,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConvertSettings {
     /// Output width, in characters.
@@ -262,6 +278,8 @@ pub struct ConvertSettings {
     pub cell_bg: bool,
     /// Explicit `--bg` color, or `None` for `auto` (derived from the image).
     pub bg: Option<[u8; 3]>,
+    /// How brightness and color are mapped (`--tone`).
+    pub tone: Tone,
 }
 
 pub fn convert_image(
@@ -379,6 +397,7 @@ fn two_tone_split(sub: &RgbImage, cell_x: u32, cell_y: u32) -> TwoToneSplit {
 
 fn build_grid(img: &DynamicImage, settings: &ConvertSettings) -> Conversion {
     let (width, two_tone) = (settings.width, settings.cell_bg);
+    let natural = settings.tone == Tone::Natural;
     let (img_w, img_h) = img.dimensions();
 
     let height = ((width as f64) * (img_h as f64) / (img_w as f64) / CELL_ASPECT_RATIO)
@@ -445,8 +464,12 @@ fn build_grid(img: &DynamicImage, settings: &ConvertSettings) -> Conversion {
     for y in 0..height {
         for x in 0..width {
             let l = luminances[(y * width + x) as usize];
-            let percentile = cdf[l as usize] as f64 / total_pixels;
-            levels[(y * width + x) as usize] = percentile * max_level;
+            let position = if natural {
+                l as f64 / 255.0
+            } else {
+                cdf[l as usize] as f64 / total_pixels
+            };
+            levels[(y * width + x) as usize] = position * max_level;
         }
     }
 
@@ -469,7 +492,11 @@ fn build_grid(img: &DynamicImage, settings: &ConvertSettings) -> Conversion {
         let percentile = cdf[lum as usize] as f64 / total_pixels;
         percentile.powf(1.0 / COLOR_GAMMA)
     };
+    // Natural tone paints each color as sampled, so `value` goes unused.
     let tone = |pixel: [u8; 3], value: f64| -> [u8; 3] {
+        if natural {
+            return pixel;
+        }
         let (hue, saturation) = rgb_to_hue_sat(pixel[0], pixel[1], pixel[2]);
         let saturation = saturation.powf(SATURATION_GAMMA);
         hsv_to_rgb(hue, saturation, value.clamp(0.0, 1.0))
@@ -929,6 +956,7 @@ mod tests {
             width,
             cell_bg,
             bg: None,
+            tone: Tone::Equalized,
         }
     }
 
@@ -1191,6 +1219,34 @@ mod tests {
         .auto_bg;
         assert_eq!(flat, two_tone);
         assert_eq!(flat, explicit);
+    }
+
+    #[test]
+    fn natural_tone_keeps_source_colors_and_brightness() {
+        // Mostly bright sand with one darker patch: equalization would push
+        // the patch toward black; natural keeps its sampled color.
+        let sand = [220u8, 190, 130];
+        let wood = [120u8, 90, 60];
+        let image = DynamicImage::ImageRgb8(RgbImage::from_fn(40, 40, |x, y| {
+            image::Rgb(if (16..24).contains(&x) && (16..24).contains(&y) {
+                wood
+            } else {
+                sand
+            })
+        }));
+        let natural = build_grid(
+            &image,
+            &ConvertSettings {
+                tone: Tone::Natural,
+                ..settings(10, false)
+            },
+        )
+        .grid;
+        let equalized = build_grid(&image, &settings(10, false)).grid;
+        let corner = natural.cells[0].color;
+        assert!(corner.iter().zip(sand).all(|(&a, b)| a.abs_diff(b) <= 2));
+        let centre = |g: &Grid| g.cells[(g.height / 2 * g.width + g.width / 2) as usize].color;
+        assert!(luminance(centre(&natural)) > luminance(centre(&equalized)));
     }
 
     #[test]

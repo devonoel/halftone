@@ -134,6 +134,14 @@ Available on both `convert` and `generate`:
 | `--mono`          | Emit plain grayscale ASCII instead of ANSI color   | off     |
 | `--bg <spec>`     | Backdrop color (`auto`, hex, or `transparent`)    | `auto`  |
 | `--flat-bg`       | One flat background instead of per-cell colors     | off     |
+| `--tone <mode>`   | `equalized` or `natural` (see below)               | `equalized` |
+
+`--tone equalized` stretches the image's own brightness range and boosts
+its color, which rescues dim, moody, or low-contrast images. `--tone natural`
+keeps the source's own brightness and colors instead. That reads better for
+bright, even artwork like maps and diagrams, where equalizing would turn a
+large flat area's small variations into noise and push everything darker
+than it toward black.
 
 `--out` accepts either a text path (`.txt`, `.ansi`, or anything else) to
 save the raw ANSI/ASCII text, or an image path (`.png`, `.jpg`/`.jpeg`,

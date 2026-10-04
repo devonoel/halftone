@@ -24,6 +24,9 @@ pub struct Options<'a> {
     /// endpoint and the model repaints the reference following the prompt,
     /// keeping its composition.
     pub reference: Option<&'a [u8]>,
+    /// More images sent along after `reference`, for the prompt to refer to
+    /// (a palette or style to match, say). Only sent with a `reference`.
+    pub extra_references: &'a [&'a [u8]],
 }
 
 impl Default for Options<'_> {
@@ -37,6 +40,7 @@ impl Default for Options<'_> {
             quality: "low",
             count: 1,
             reference: None,
+            extra_references: &[],
         }
     }
 }
@@ -217,12 +221,19 @@ fn request_batch(
                 .file_name("reference.png")
                 .mime_str("image/png")
                 .map_err(|err| BatchError::Other(format!("bad reference image: {err}")))?;
-            let form = edit_fields(prompt, options, n)
+            let mut form = edit_fields(prompt, options, n)
                 .into_iter()
                 .fold(reqwest::blocking::multipart::Form::new(), |form, (k, v)| {
                     form.text(k, v)
                 })
                 .part("image[]", image);
+            for (i, extra) in options.extra_references.iter().enumerate() {
+                let part = reqwest::blocking::multipart::Part::bytes(extra.to_vec())
+                    .file_name(format!("reference-{}.png", i + 2))
+                    .mime_str("image/png")
+                    .map_err(|err| BatchError::Other(format!("bad reference image: {err}")))?;
+                form = form.part("image[]", part);
+            }
             client.post(EDITS_URL).multipart(form)
         }
         None => client.post(GENERATIONS_URL).json(&ImageRequest {
@@ -361,6 +372,7 @@ mod tests {
             quality: "medium",
             count: 1,
             reference: Some(b"png"),
+            extra_references: &[],
         };
         let fields = edit_fields("paint it", &options, 2);
         let get = |k| {
