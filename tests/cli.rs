@@ -105,6 +105,45 @@ fn out_png_writes_an_image_sized_by_cells() {
 }
 
 #[test]
+fn a_smaller_cell_keeps_the_raster_size_while_adding_glyphs() {
+    let dir = scratch("cell");
+    let path = dir.join("art.png");
+    let output = halftone(&[
+        "convert",
+        FIXTURE,
+        "--width",
+        "60",
+        "--cell",
+        "5",
+        "--out",
+        path_str(&path),
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let image = image::open(&path).unwrap();
+    // 60 columns at 5px is the same raster as 30 columns at 10px.
+    assert_eq!((image.width(), image.height()), (60 * 5, 30 * 10));
+}
+
+#[test]
+fn out_jpg_is_a_jpeg() {
+    let dir = scratch("out_jpg");
+    let path = dir.join("art.jpg");
+    let output = halftone(&[
+        "convert",
+        FIXTURE,
+        "--width",
+        "30",
+        "--out",
+        path_str(&path),
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(&bytes[..2], &[0xFF, 0xD8]);
+    let image = image::load_from_memory(&bytes).unwrap();
+    assert_eq!((image.width(), image.height()), (30 * 10, 15 * 20));
+}
+
+#[test]
 fn out_image_extension_is_case_insensitive() {
     let dir = scratch("out_upper");
     let path = dir.join("ART.PNG");

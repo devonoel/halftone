@@ -59,8 +59,42 @@ const FONT_BYTES: &[u8] = include_bytes!("../assets/JetBrainsMono-Bold.ttf");
 
 // Pixel size of one character cell when rasterizing to an image. Kept at the
 // same 2:1 height:width ratio as CELL_ASPECT_RATIO above, for the same reason.
-const CELL_PIXEL_WIDTH: u32 = 10;
-const CELL_PIXEL_HEIGHT: u32 = 20;
+// This is the default width; the height is always twice it (see
+// `CellPixels`). A smaller cell packs more glyphs into the same raster.
+pub const CELL_PIXEL_WIDTH: u32 = 10;
+
+/// Pixel size of one character cell in a raster export. The height is always
+/// twice the width, the same proportion as a terminal cell, so a narrower
+/// cell is a smaller glyph rather than a stretched one. Only the width is
+/// stored, so the proportion can't be broken.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CellPixels {
+    width: u32,
+}
+
+impl Default for CellPixels {
+    fn default() -> Self {
+        Self::from_width(CELL_PIXEL_WIDTH)
+    }
+}
+
+impl CellPixels {
+    /// A cell `width` pixels wide and twice as tall. A zero width is raised
+    /// to 1 so the raster is never empty.
+    pub fn from_width(width: u32) -> Self {
+        Self {
+            width: width.max(1),
+        }
+    }
+
+    pub fn width(self) -> u32 {
+        self.width
+    }
+
+    pub fn height(self) -> u32 {
+        self.width.saturating_mul(2)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cell {
@@ -826,13 +860,25 @@ pub enum Background {
 
 /// Fills one character cell's pixel rectangle with a solid color, for
 /// per-cell backgrounds. Generic over pixel type so the opaque (`Rgb`) and translucent
-/// (`Rgba`) canvases in `render_image` can share it.
-fn fill_cell<P: Pixel>(canvas: &mut ImageBuffer<P, Vec<P::Subpixel>>, x: u32, y: u32, color: P) {
-    for py in y * CELL_PIXEL_HEIGHT..(y + 1) * CELL_PIXEL_HEIGHT {
-        for px in x * CELL_PIXEL_WIDTH..(x + 1) * CELL_PIXEL_WIDTH {
+/// (`Rgba`) canvases in `render_raster` can share it.
+fn fill_cell<P: Pixel>(
+    canvas: &mut ImageBuffer<P, Vec<P::Subpixel>>,
+    x: u32,
+    y: u32,
+    cell: CellPixels,
+    color: P,
+) {
+    let (width, height) = (cell.width(), cell.height());
+    for py in y * height..(y + 1) * height {
+        for px in x * width..(x + 1) * width {
             canvas.put_pixel(px, py, color);
         }
     }
+}
+
+/// `render_raster` at the default 10x20 cell.
+pub fn render_image(grid: &Grid, mono: bool, bg: Background, cell_bg: bool) -> DynamicImage {
+    render_raster(grid, mono, bg, cell_bg, CellPixels::default())
 }
 
 // Renders the same glyph grid to a raster image, so ASCII/ANSI art can be
@@ -852,37 +898,46 @@ fn fill_cell<P: Pixel>(canvas: &mut ImageBuffer<P, Vec<P::Subpixel>>, x: u32, y:
 // which become solid tiles instead of letting `bg` show through. The tiles
 // cover `bg`'s color entirely, but a translucent `bg`'s alpha carries over
 // to them so a semi-transparent export stays semi-transparent.
-pub fn render_image(grid: &Grid, mono: bool, bg: Background, cell_bg: bool) -> DynamicImage {
+//
+// `cell` sets the pixel size of each glyph. A smaller cell with
+// proportionally more grid columns gives a denser picture at the same size.
+pub fn render_raster(
+    grid: &Grid,
+    mono: bool,
+    bg: Background,
+    cell_bg: bool,
+    cell: CellPixels,
+) -> DynamicImage {
     let cell_bg = cell_bg && !mono;
     let font = FontRef::try_from_slice(FONT_BYTES).expect("bundled font is valid");
-    let scale = PxScale::from(CELL_PIXEL_HEIGHT as f32);
-    let img_width = grid.width * CELL_PIXEL_WIDTH;
-    let img_height = grid.height * CELL_PIXEL_HEIGHT;
+    let scale = PxScale::from(cell.height() as f32);
+    let img_width = grid.width * cell.width();
+    let img_height = grid.height * cell.height();
 
     match bg {
         Background::Opaque(color) => {
             let mut canvas = RgbImage::from_pixel(img_width, img_height, Rgb(color));
             for y in 0..grid.height {
                 for x in 0..grid.width {
-                    let cell = &grid.cells[(y * grid.width + x) as usize];
+                    let glyph = &grid.cells[(y * grid.width + x) as usize];
                     if cell_bg {
-                        fill_cell(&mut canvas, x, y, Rgb(cell_background(cell, color)));
+                        fill_cell(&mut canvas, x, y, cell, Rgb(cell_background(glyph, color)));
                     }
-                    if cell.glyph == ' ' {
+                    if glyph.glyph == ' ' {
                         continue;
                     }
                     let color = if mono {
                         Rgb([255, 255, 255])
                     } else {
-                        Rgb(cell.color)
+                        Rgb(glyph.color)
                     };
                     let mut buf = [0u8; 4];
-                    let glyph_str = cell.glyph.encode_utf8(&mut buf);
+                    let glyph_str = glyph.glyph.encode_utf8(&mut buf);
                     draw_text_mut(
                         &mut canvas,
                         color,
-                        (x * CELL_PIXEL_WIDTH) as i32,
-                        (y * CELL_PIXEL_HEIGHT) as i32,
+                        (x * cell.width()) as i32,
+                        (y * cell.height()) as i32,
                         scale,
                         &font,
                         glyph_str,
@@ -899,23 +954,23 @@ pub fn render_image(grid: &Grid, mono: bool, bg: Background, cell_bg: bool) -> D
             );
             for y in 0..grid.height {
                 for x in 0..grid.width {
-                    let cell = &grid.cells[(y * grid.width + x) as usize];
+                    let glyph = &grid.cells[(y * grid.width + x) as usize];
                     if cell_bg {
-                        let [r, g, b] = cell_background(cell, color);
-                        fill_cell(&mut canvas, x, y, Rgba([r, g, b, alpha]));
+                        let [r, g, b] = cell_background(glyph, color);
+                        fill_cell(&mut canvas, x, y, cell, Rgba([r, g, b, alpha]));
                     }
-                    if cell.glyph == ' ' {
+                    if glyph.glyph == ' ' {
                         continue;
                     }
-                    let [r, g, b] = if mono { [255, 255, 255] } else { cell.color };
-                    let color = Rgba([r, g, b, 255]);
+                    let [r, g, b] = if mono { [255, 255, 255] } else { glyph.color };
+                    let ink = Rgba([r, g, b, 255]);
                     let mut buf = [0u8; 4];
-                    let glyph_str = cell.glyph.encode_utf8(&mut buf);
+                    let glyph_str = glyph.glyph.encode_utf8(&mut buf);
                     draw_text_mut(
                         &mut canvas,
-                        color,
-                        (x * CELL_PIXEL_WIDTH) as i32,
-                        (y * CELL_PIXEL_HEIGHT) as i32,
+                        ink,
+                        (x * cell.width()) as i32,
+                        (y * cell.height()) as i32,
                         scale,
                         &font,
                         glyph_str,
@@ -1359,10 +1414,21 @@ mod tests {
             Background::Opaque([0, 0, 0]),
             true,
         );
-        assert_eq!(
-            image.dimensions(),
-            (7 * CELL_PIXEL_WIDTH, 3 * CELL_PIXEL_HEIGHT)
+        let cell = CellPixels::default();
+        assert_eq!(image.dimensions(), (7 * cell.width(), 3 * cell.height()));
+    }
+
+    #[test]
+    fn a_smaller_cell_packs_the_same_grid_into_fewer_pixels() {
+        let grid = uniform_grid(7, 3, red_hash);
+        let image = render_raster(
+            &grid,
+            false,
+            Background::Opaque([0, 0, 0]),
+            true,
+            CellPixels::from_width(5),
         );
+        assert_eq!(image.dimensions(), (7 * 5, 3 * 10));
     }
 
     #[test]

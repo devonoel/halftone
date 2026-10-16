@@ -130,6 +130,7 @@ Available on both `convert` and `generate`:
 | Flag             | Description                                      | Default |
 | ---------------- | ------------------------------------------------- | ------- |
 | `--width <N>`     | Output width in characters                        | `80`    |
+| `--cell <px>`     | Glyph width in a raster export; height is twice that. Smaller with a higher `--width` gives a denser picture at the same size | `10`    |
 | `--out <path>`    | Write output to a file (also prints to stdout)     | —       |
 | `--mono`          | Emit plain grayscale ASCII instead of ANSI color   | off     |
 | `--bg <spec>`     | Backdrop color (`auto`, hex, or `transparent`)    | `auto`  |

@@ -2,7 +2,13 @@ use clap::{Args, Parser, Subcommand};
 #[cfg(feature = "generate")]
 use halftone::openai;
 use halftone::pipeline;
+use image::ImageEncoder;
 use std::path::{Path, PathBuf};
+
+/// JPEG quality for ASCII rasters. The `image` crate's default of 75
+/// softens glyph edges; 92 keeps them sharp and still compresses the
+/// large cell grid.
+const JPEG_QUALITY: u8 = 92;
 
 #[derive(Parser)]
 #[command(
@@ -93,6 +99,14 @@ struct ConvertOptions {
     /// Output width, in characters.
     #[arg(long, default_value_t = 80, value_parser = clap::value_parser!(u32).range(1..))]
     width: u32,
+
+    /// Pixel width of one glyph in a raster export. The height is twice
+    /// this, like a terminal cell. The default, 10, is a 10x20 cell. On its
+    /// own, a smaller cell just makes a smaller image; with a proportionally
+    /// higher `--width` it gives a denser picture at the same size. Text
+    /// output ignores this.
+    #[arg(long, default_value_t = pipeline::CELL_PIXEL_WIDTH, value_parser = clap::value_parser!(u32).range(4..=32))]
+    cell: u32,
 
     /// Write output to this file instead of stdout.
     #[arg(long)]
@@ -252,13 +266,14 @@ impl ConvertOptions {
 /// so transparency sticks to the one format guaranteed to round-trip it
 /// correctly rather than silently flattening to black/white on the others.
 fn supports_alpha(path: &Path) -> bool {
-    matches!(
-        path.extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.to_ascii_lowercase())
-            .as_deref(),
-        Some("png")
-    )
+    matches!(extension(path).as_deref(), Some("png"))
+}
+
+/// `path`'s extension, lowercased, so format checks are case-insensitive.
+fn extension(path: &Path) -> Option<String> {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
 }
 
 /// Resolves the effective prompt text for `generate`: either the positional
@@ -393,15 +408,31 @@ fn indexed_path(path: &Path, index: usize, total: usize) -> PathBuf {
     path.with_file_name(name)
 }
 
+/// Writes `image` to `path`. JPEG uses [`JPEG_QUALITY`]; every other
+/// format goes through `image`'s own encoder, so PNG stays lossless.
+fn save_raster(image: &image::DynamicImage, path: &Path) -> image::ImageResult<()> {
+    if !matches!(extension(path).as_deref(), Some("jpg" | "jpeg")) {
+        return image.save(path);
+    }
+    let rgb = image.to_rgb8();
+    let mut bytes = Vec::new();
+    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, JPEG_QUALITY);
+    encoder.write_image(
+        rgb.as_raw(),
+        rgb.width(),
+        rgb.height(),
+        image::ExtendedColorType::Rgb8,
+    )?;
+    std::fs::write(path, bytes)?;
+    Ok(())
+}
+
 /// Extensions recognized as "render this as a raster image" for `--out`.
 /// Anything else is treated as a text destination for the ANSI/ASCII art.
 fn is_image_path(path: &Path) -> bool {
     matches!(
-        path.extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.to_ascii_lowercase())
-            .as_deref(),
-        Some("png") | Some("jpg") | Some("jpeg") | Some("bmp") | Some("tiff") | Some("webp")
+        extension(path).as_deref(),
+        Some("png" | "jpg" | "jpeg" | "bmp" | "tiff" | "webp")
     )
 }
 
@@ -427,8 +458,14 @@ fn write_output(conversion: &pipeline::Conversion, options: &ConvertOptions, out
             );
             std::process::exit(1);
         }
-        let image = pipeline::render_image(grid, mono, bg, options.cell_bg());
-        if let Err(err) = image.save(path) {
+        let image = pipeline::render_raster(
+            grid,
+            mono,
+            bg,
+            options.cell_bg(),
+            pipeline::CellPixels::from_width(options.cell),
+        );
+        if let Err(err) = save_raster(&image, path) {
             eprintln!("failed to write {}: {}", path.display(), err);
             std::process::exit(1);
         }
