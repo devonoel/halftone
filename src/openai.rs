@@ -8,7 +8,7 @@ const GENERATIONS_URL: &str = "https://api.openai.com/v1/images/generations";
 const EDITS_URL: &str = "https://api.openai.com/v1/images/edits";
 
 /// The model `halftone generate` uses unless told otherwise.
-pub const DEFAULT_MODEL: &str = "gpt-image-1";
+pub const DEFAULT_MODEL: &str = "gpt-image-2.5-sunburst";
 
 /// What to generate, beyond the prompt.
 pub struct Options<'a> {
@@ -436,7 +436,7 @@ mod tests {
         let options = Options::default();
         assert_eq!(
             (options.model, options.quality, options.count),
-            ("gpt-image-1", "low", 1)
+            ("gpt-image-2.5-sunburst", "low", 1)
         );
         assert!(options.reference.is_none());
     }

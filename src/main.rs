@@ -88,7 +88,7 @@ enum ImageShape {
 
 #[cfg(feature = "generate")]
 impl ImageShape {
-    /// gpt-image-1 only accepts these three exact size strings (dall-e-3's
+    /// The three standard sizes every OpenAI image model accepts (dall-e-3's
     /// 1792x1024/1024x1792 no longer apply now that it's been shut down).
     fn as_openai_size(self) -> &'static str {
         match self {
@@ -706,7 +706,10 @@ mod tests {
         else {
             unreachable!()
         };
-        assert_eq!((model.as_str(), quality.as_str()), ("gpt-image-1", "low"));
+        assert_eq!(
+            (model.as_str(), quality.as_str()),
+            ("gpt-image-2.5-sunburst", "low")
+        );
     }
 
     #[cfg(feature = "generate")]

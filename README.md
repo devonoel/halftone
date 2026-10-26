@@ -8,7 +8,7 @@ Turn images into ANSI/ASCII art, right in your terminal.
 rendering, using histogram equalization and Floyd-Steinberg dithering to
 preserve detail that naive brightness-to-glyph mapping throws away. It can
 also generate the source image for you from a text prompt via OpenAI's
-`gpt-image-1`, so you can go from an idea to terminal art in one command.
+image models, so you can go from an idea to terminal art in one command.
 
 <table>
   <tr>
@@ -203,7 +203,7 @@ guaranteed backdrop.
 | `--prompt-file <path>` | Read the prompt from a file instead of the positional argument | —    |
 | `--reference <path>`   | An image for the model to repaint, keeping its composition | —        |
 | `--cutout`             | Paint just the subject on a transparent background; the art keeps that transparency | off |
-| `--model <name>`       | OpenAI image model                                         | `gpt-image-1` |
+| `--model <name>`       | OpenAI image model                                         | `gpt-image-2.5-sunburst` |
 | `--quality <level>`    | `low`, `medium`, `high`, or `auto` (`xhigh`/`max` on gpt-image-2.5 models) | `low` |
 
 `--count` asks OpenAI for all `N` images in a single request rather than
