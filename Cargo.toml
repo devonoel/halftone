@@ -1,6 +1,6 @@
 [package]
 name = "halftone"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Turn images into ANSI/ASCII splash art, right in your terminal"
@@ -12,7 +12,7 @@ categories = ["command-line-utilities"]
 exclude = ["tests/fixtures/", "tests/snapshots/"]
 
 [features]
-default = ["cli", "generate"]
+default = ["cli", "generate", "all-formats"]
 # The `halftone` binary itself. Crates using halftone as a library can turn
 # this off (`default-features = false`) to skip clap.
 cli = ["dep:clap"]
@@ -20,6 +20,10 @@ cli = ["dep:clap"]
 # client and TLS stack that the conversion/rendering library never touches.
 # Also available to library users (`halftone::openai`), without the CLI.
 generate = ["dep:base64", "dep:reqwest", "dep:serde", "dep:serde_json"]
+# Every image format the `image` crate reads, and its multithreaded decoding.
+# Without it, halftone still reads and writes PNG, JPEG, WebP, GIF, BMP and
+# TIFF, and builds for wasm32 (rayon and some codecs don't).
+all-formats = ["image/default"]
 
 [[bin]]
 name = "halftone"
@@ -34,7 +38,7 @@ required-features = ["cli"]
 ab_glyph = "0.2.32"
 base64 = { version = "0.22.1", optional = true }
 clap = { version = "4.6.1", features = ["derive"], optional = true }
-image = "0.25.10"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp", "tiff"] }
 imageproc = { version = "0.27.0", default-features = false, features = ["text"] }
 reqwest = { version = "0.13.4", features = ["blocking", "json", "multipart"], optional = true }
 serde = { version = "1.0.228", features = ["derive"], optional = true }

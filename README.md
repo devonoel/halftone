@@ -234,6 +234,10 @@ Add halftone with `default-features = false` to use the conversion and
 rendering pipeline (`halftone::pipeline`) without the CLI. Enable the
 `generate` feature too to call OpenAI's image API (`halftone::openai`).
 
+Without the `all-formats` feature (on by default), halftone reads and writes
+PNG, JPEG, WebP, GIF, BMP and TIFF only, and builds for
+`wasm32-unknown-unknown`, so the pipeline can run in a browser.
+
 ## Requirements
 
 - `OPENAI_API_KEY` environment variable, only for `generate`.
