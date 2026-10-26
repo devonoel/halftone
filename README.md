@@ -173,6 +173,14 @@ everything toward a color of your choosing instead.
   PNG only for image exports; terminals have no opacity, so ANSI output
   just uses the color.
 
+A source image with transparency keeps it: wherever the source is
+transparent, so is the art. Those cells are left empty (a plain space in
+the terminal), cells it only partly covers are partly transparent in a PNG,
+and everything it covers renders as usual, per-cell backgrounds included.
+`--bg` still sets the backdrop within the art. Exports to a format without
+an alpha channel (`.jpg`, `.bmp`, `.tiff`) are flattened onto the `--bg`
+color instead. `generate --cutout` produces such a source to begin with.
+
 Pass `--flat-bg` for the simpler look: one flat `--bg` color behind
 everything and a single color per cell. In the terminal, `--flat-bg`
 leaves the background to your terminal. `--mono` implies it.
@@ -194,6 +202,7 @@ guaranteed backdrop.
 | `-n, --count <N>`      | Generate this many images from the same prompt (1-10)      | `1`      |
 | `--prompt-file <path>` | Read the prompt from a file instead of the positional argument | —    |
 | `--reference <path>`   | An image for the model to repaint, keeping its composition | —        |
+| `--cutout`             | Paint just the subject on a transparent background; the art keeps that transparency | off |
 | `--model <name>`       | OpenAI image model                                         | `gpt-image-1` |
 | `--quality <level>`    | `low`, `medium`, `high`, or `auto` (`xhigh`/`max` on gpt-image-2.5 models) | `low` |
 

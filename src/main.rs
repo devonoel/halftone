@@ -56,6 +56,11 @@ enum Command {
         /// model repaints following the prompt, keeping its composition.
         #[arg(long)]
         reference: Option<PathBuf>,
+        /// Have the model paint just the subject, on a transparent background,
+        /// instead of a full scene. That transparency carries through to the
+        /// art like any transparent source's: the empty cells are left out.
+        #[arg(long)]
+        cutout: bool,
         /// OpenAI image model.
         #[arg(long, default_value = openai::DEFAULT_MODEL)]
         model: String,
@@ -127,6 +132,9 @@ struct ConvertOptions {
     /// shows through; terminals have no opacity, so ANSI output uses the
     /// color as-is. Anything other than full opacity is PNG output only. In
     /// the terminal, `--flat-bg` leaves the background to the terminal.
+    /// Wherever the source image is itself transparent, so is the art,
+    /// whatever `--bg` is: a PNG export is transparent there, and a format
+    /// without transparency gets it flattened onto this color.
     #[arg(long, default_value = "auto")]
     bg: String,
 
@@ -259,6 +267,18 @@ impl ConvertOptions {
     }
 }
 
+/// Composites `image` onto a solid `color`, for a transparent source's art
+/// going to a format with no alpha channel.
+fn flatten(image: &image::DynamicImage, color: [u8; 3]) -> image::DynamicImage {
+    let mut canvas = image::RgbaImage::from_pixel(
+        image.width(),
+        image.height(),
+        image::Rgba([color[0], color[1], color[2], 255]),
+    );
+    image::imageops::overlay(&mut canvas, &image.to_rgba8(), 0, 0);
+    image::DynamicImage::ImageRgb8(image::DynamicImage::ImageRgba8(canvas).to_rgb8())
+}
+
 /// Whether `path`'s extension supports an alpha channel, for gating any
 /// non-fully-opaque `--bg`. Only PNG among today's `is_image_path` formats
 /// does in the way this tool writes files -- JPEG has no alpha at all, and
@@ -309,6 +329,7 @@ fn main() {
             save_image,
             count,
             reference,
+            cutout,
             model,
             quality,
         } => {
@@ -333,6 +354,7 @@ fn main() {
                 count,
                 reference: reference.as_deref(),
                 extra_references: &[],
+                transparent: cutout,
             };
             let images = match openai::generate(&prompt, &request) {
                 Ok(images) => images,
@@ -458,13 +480,16 @@ fn write_output(conversion: &pipeline::Conversion, options: &ConvertOptions, out
             );
             std::process::exit(1);
         }
-        let image = pipeline::render_raster(
+        let mut image = pipeline::render_raster(
             grid,
             mono,
             bg,
             options.cell_bg(),
             pipeline::CellPixels::from_width(options.cell),
         );
+        if !grid.is_opaque() && !supports_alpha(path) {
+            image = flatten(&image, base);
+        }
         if let Err(err) = save_raster(&image, path) {
             eprintln!("failed to write {}: {}", path.display(), err);
             std::process::exit(1);

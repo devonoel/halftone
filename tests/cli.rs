@@ -276,3 +276,66 @@ fn generate_is_absent_without_the_feature() {
     assert!(!output.status.success());
     assert!(stderr(&output).contains("unrecognized subcommand"));
 }
+
+/// A transparent PNG holding a filled square in its middle, written into
+/// `dir`.
+fn cut_out_fixture(dir: &Path) -> PathBuf {
+    let path = dir.join("cut-out.png");
+    image::RgbaImage::from_fn(64, 64, |x, y| {
+        if (16..48).contains(&x) && (16..48).contains(&y) {
+            image::Rgba([230, 120, 30, 255])
+        } else {
+            image::Rgba([0, 0, 0, 0])
+        }
+    })
+    .save(&path)
+    .unwrap();
+    path
+}
+
+#[test]
+fn a_transparent_source_stays_transparent_in_a_png() {
+    let dir = scratch("cut_out_png");
+    let source = cut_out_fixture(&dir);
+    let path = dir.join("art.png");
+    let output = halftone(&[
+        "convert",
+        path_str(&source),
+        "--width",
+        "16",
+        "--out",
+        path_str(&path),
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let image = image::open(&path).unwrap().to_rgba8();
+    assert_eq!(image.get_pixel(0, 0)[3], 0, "corner isn't transparent");
+    let (w, h) = image.dimensions();
+    assert_eq!(image.get_pixel(w / 2, h / 2)[3], 255, "middle isn't opaque");
+}
+
+#[test]
+fn a_transparent_source_is_flattened_onto_the_backdrop_in_a_jpg() {
+    let dir = scratch("cut_out_jpg");
+    let source = cut_out_fixture(&dir);
+    let path = dir.join("art.jpg");
+    let output = halftone(&[
+        "convert",
+        path_str(&source),
+        "--width",
+        "16",
+        "--bg",
+        "204060",
+        "--out",
+        path_str(&path),
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let image = image::open(&path).unwrap().to_rgb8();
+    let [r, g, b] = image.get_pixel(2, 2).0;
+    // JPEG is lossy, so near the backdrop rather than exactly on it.
+    let near = |a: u8, b: u8| a.abs_diff(b) <= 6;
+    assert!(
+        near(r, 0x20) && near(g, 0x40) && near(b, 0x60),
+        "{:?}",
+        [r, g, b]
+    );
+}

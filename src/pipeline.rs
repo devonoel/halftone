@@ -105,7 +105,23 @@ pub struct Cell {
     /// glyph color can't. With `--flat-bg` it's never painted, and is just
     /// a copy of `color`.
     pub shade: [u8; 3],
+    /// How much of the cell the source image covers, from 0 (the source is
+    /// transparent here, so the cell is left empty) to 255 (fully opaque, as
+    /// every cell of an image without transparency is). The source's own
+    /// transparency carries through to the art: a raster export is that
+    /// transparent over this cell, glyph, cell background and backdrop alike.
+    pub alpha: u8,
 }
+
+// Cells whose source coverage comes out within this of fully transparent or
+// fully opaque are snapped to it. Lanczos resampling rings slightly around
+// hard alpha edges, which would otherwise leave faint, barely-there cells
+// scattered over a cut-out's empty surroundings.
+const ALPHA_SNAP: u8 = 8;
+
+// Sub-pixels at or above this opacity count as part of the picture when a
+// cell is split into two tones; the rest are left out of the split.
+const SUB_PIXEL_VISIBLE: u8 = 128;
 
 // Sub-pixels sampled per cell for two-tone mode, which per-cell backgrounds
 // render with. 4x8 keeps them square (cells
@@ -273,6 +289,14 @@ pub struct Grid {
     pub cells: Vec<Cell>,
 }
 
+impl Grid {
+    /// Whether every cell is fully opaque: always, for a source without
+    /// transparency.
+    pub fn is_opaque(&self) -> bool {
+        self.cells.iter().all(|cell| cell.alpha == 255)
+    }
+}
+
 /// The result of converting an image: its grid, plus the backdrop color
 /// derived from the source image for `--bg auto`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -359,24 +383,49 @@ const TWO_TONE_KMEANS_ITERATIONS: usize = 6;
 /// luminance is what lets a cell that's half red, half orange at similar
 /// brightness split into those two tones at all -- a luminance threshold
 /// only ever finds light-vs-dark. The brighter of the two groups is `light`.
-fn two_tone_split(sub: &RgbImage, cell_x: u32, cell_y: u32) -> TwoToneSplit {
+///
+/// With `sub_alpha` (a transparent source), only the sub-pixels the source
+/// visibly covers take part, so a cell on a cut-out's edge splits into the
+/// picture's own tones rather than one of them being "nothing". Its
+/// transparent sub-pixels are never in the light group's mask.
+fn two_tone_split(
+    sub: &RgbImage,
+    sub_alpha: Option<&[u8]>,
+    cell_x: u32,
+    cell_y: u32,
+) -> TwoToneSplit {
     const N: usize = (TWO_TONE_SUB_W * TWO_TONE_SUB_H) as usize;
     let mut pixels = [[0f64; 3]; N];
+    let mut shown = [true; N];
     for sy in 0..TWO_TONE_SUB_H {
         for sx in 0..TWO_TONE_SUB_W {
-            let pixel = sub
-                .get_pixel(cell_x * TWO_TONE_SUB_W + sx, cell_y * TWO_TONE_SUB_H + sy)
-                .0;
-            pixels[(sy * TWO_TONE_SUB_W + sx) as usize] = pixel.map(|c| c as f64);
+            let (px, py) = (cell_x * TWO_TONE_SUB_W + sx, cell_y * TWO_TONE_SUB_H + sy);
+            let i = (sy * TWO_TONE_SUB_W + sx) as usize;
+            pixels[i] = sub.get_pixel(px, py).0.map(|c| c as f64);
+            if let Some(alpha) = sub_alpha {
+                shown[i] = alpha[(py * sub.width() + px) as usize] >= SUB_PIXEL_VISIBLE;
+            }
         }
     }
+    // A cell only faintly covered can have no sub-pixel over the threshold;
+    // it still gets split, from all of them, rather than not at all.
+    if !shown.contains(&true) {
+        shown = [true; N];
+    }
+    let visible = || {
+        pixels
+            .iter()
+            .zip(&shown)
+            .filter(|&(_, &s)| s)
+            .map(|(p, _)| p)
+    };
 
     let lum = |p: &[f64; 3]| 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
     let dist = |a: &[f64; 3], b: &[f64; 3]| (0..3).map(|c| (a[c] - b[c]).powi(2)).sum::<f64>();
     let by_lum = |a: &&[f64; 3], b: &&[f64; 3]| lum(a).total_cmp(&lum(b));
     let mut centroids = [
-        *pixels.iter().max_by(by_lum).expect("cell has pixels"),
-        *pixels.iter().min_by(by_lum).expect("cell has pixels"),
+        *visible().max_by(by_lum).expect("cell has pixels"),
+        *visible().min_by(by_lum).expect("cell has pixels"),
     ];
 
     let mut assignment = [0usize; N];
@@ -389,7 +438,12 @@ fn two_tone_split(sub: &RgbImage, cell_x: u32, cell_y: u32) -> TwoToneSplit {
         }
         let mut sums = [[0f64; 3]; 2];
         let mut counts = [0f64; 2];
-        for (p, &group) in pixels.iter().zip(&assignment) {
+        for ((p, &group), _) in pixels
+            .iter()
+            .zip(&assignment)
+            .zip(&shown)
+            .filter(|&(_, &s)| s)
+        {
             for c in 0..3 {
                 sums[group][c] += p[c];
             }
@@ -412,7 +466,7 @@ fn two_tone_split(sub: &RgbImage, cell_x: u32, cell_y: u32) -> TwoToneSplit {
     let light_group = usize::from(lum(&centroids[1]) > lum(&centroids[0]));
     let mut mask = 0u32;
     for (i, &group) in assignment.iter().enumerate() {
-        if group == light_group {
+        if group == light_group && shown[i] {
             mask |= 1 << i;
         }
     }
@@ -425,8 +479,56 @@ fn two_tone_split(sub: &RgbImage, cell_x: u32, cell_y: u32) -> TwoToneSplit {
         dark,
         mask,
         contrast: luminance(light) - luminance(dark),
-        mean_luminance: pixels.iter().map(lum).sum::<f64>() / N as f64,
+        mean_luminance: visible().map(lum).sum::<f64>() / visible().count() as f64,
     }
+}
+
+/// Whether `img` has any pixel that isn't fully opaque.
+fn has_transparency(img: &DynamicImage) -> bool {
+    img.color().has_alpha() && img.to_rgba8().pixels().any(|p| p.0[3] < 255)
+}
+
+/// `img` resized to exactly `width`x`height`, plus each pixel's opacity when
+/// `transparent`. A transparent source is resampled premultiplied, so
+/// whatever color sits under its transparent pixels (often black, sometimes
+/// leftover garbage) doesn't bleed into the visible pixels beside them. An
+/// opaque one takes the plain RGB path, unchanged.
+fn sample(
+    img: &DynamicImage,
+    width: u32,
+    height: u32,
+    transparent: bool,
+) -> (RgbImage, Option<Vec<u8>>) {
+    if !transparent {
+        let rgb = img
+            .resize_exact(width, height, FilterType::Lanczos3)
+            .to_rgb8();
+        return (rgb, None);
+    }
+    let mut premultiplied = img.to_rgba32f();
+    for pixel in premultiplied.pixels_mut() {
+        let [r, g, b, a] = pixel.0;
+        pixel.0 = [r * a, g * a, b * a, a];
+    }
+    let small = DynamicImage::ImageRgba32F(premultiplied)
+        .resize_exact(width, height, FilterType::Lanczos3)
+        .into_rgba32f();
+    let mut rgb = RgbImage::new(width, height);
+    let mut alpha = Vec::with_capacity((width * height) as usize);
+    for (x, y, pixel) in small.enumerate_pixels() {
+        let [r, g, b, a] = pixel.0;
+        let a = a.clamp(0.0, 1.0);
+        let channel = |v: f32| {
+            if a > 0.0 {
+                (v / a * 255.0).round().clamp(0.0, 255.0) as u8
+            } else {
+                0
+            }
+        };
+        rgb.put_pixel(x, y, Rgb([channel(r), channel(g), channel(b)]));
+        alpha.push((a * 255.0).round() as u8);
+    }
+    (rgb, Some(alpha))
 }
 
 fn build_grid(img: &DynamicImage, settings: &ConvertSettings) -> Conversion {
@@ -440,19 +542,31 @@ fn build_grid(img: &DynamicImage, settings: &ConvertSettings) -> Conversion {
 
     // Resizing straight down to the target character grid lets the filter's
     // own downsampling do the per-cell averaging, rather than hand-rolling it.
-    let small = img.resize_exact(width, height, FilterType::Lanczos3);
-    let rgb = small.to_rgb8();
+    let transparent = has_transparency(img);
+    let (rgb, alpha) = sample(img, width, height, transparent);
+    let alphas: Vec<u8> = match alpha {
+        Some(alpha) => alpha
+            .into_iter()
+            .map(|a| match a {
+                a if a < ALPHA_SNAP => 0,
+                a if a > 255 - ALPHA_SNAP => 255,
+                a => a,
+            })
+            .collect(),
+        None => vec![255; (width * height) as usize],
+    };
+    let visible = |i: usize| alphas[i] > 0;
 
     // Two-tone mode needs to see inside each cell, not just its average, so it
     // gets its own higher-resolution resample alongside the one-pixel-per-cell
     // one above (which still drives equalization and dithering either way).
     let sub = two_tone.then(|| {
-        img.resize_exact(
+        sample(
+            img,
             width * TWO_TONE_SUB_W,
             height * TWO_TONE_SUB_H,
-            FilterType::Lanczos3,
+            transparent,
         )
-        .to_rgb8()
     });
     let (edge_glyphs, ramp_glyphs) = if two_tone {
         let ramp = std::str::from_utf8(RAMP).expect("ramp is ASCII");
@@ -472,17 +586,23 @@ fn build_grid(img: &DynamicImage, settings: &ConvertSettings) -> Conversion {
     // actual subject sits in a narrow, clustered midtone band -- it spreads
     // that cluster out across the ramp instead of collapsing it into one or
     // two glyphs.
+    //
+    // Only cells the source actually covers count: a cut-out's empty
+    // surroundings aren't part of the picture's brightness distribution.
     let mut luminances = vec![0u8; (width * height) as usize];
     let mut histogram = [0u32; 256];
     for y in 0..height {
         for x in 0..width {
             let l = luminance_at(x, y);
-            luminances[(y * width + x) as usize] = l;
-            histogram[l as usize] += 1;
+            let i = (y * width + x) as usize;
+            luminances[i] = l;
+            if visible(i) {
+                histogram[l as usize] += 1;
+            }
         }
     }
 
-    let total_pixels = (width * height) as f64;
+    let total_pixels = (histogram.iter().sum::<u32>() as f64).max(1.0);
     let mut cdf = [0u32; 256];
     let mut running = 0u32;
     for (value, &count) in histogram.iter().enumerate() {
@@ -548,7 +668,13 @@ fn build_grid(img: &DynamicImage, settings: &ConvertSettings) -> Conversion {
             colors.push(tone(rgb.get_pixel(x, y).0, brightness));
         }
     }
-    let auto_bg = average_background(&colors);
+    let visible_colors: Vec<[u8; 3]> = colors
+        .iter()
+        .enumerate()
+        .filter(|&(i, _)| visible(i))
+        .map(|(_, &color)| color)
+        .collect();
+    let auto_bg = average_background(&visible_colors);
     let base = settings.bg.unwrap_or(auto_bg).map(|c| c as f64);
     let blend_bg = |shade: [u8; 3]| -> [f64; 3] {
         std::array::from_fn(|c| base[c] + (shade[c] as f64 - base[c]) * CELL_BG_STRENGTH)
@@ -574,6 +700,18 @@ fn build_grid(img: &DynamicImage, settings: &ConvertSettings) -> Conversion {
     for y in 0..height {
         for x in 0..width {
             let i = (y * width + x) as usize;
+            // Where the source is transparent there's nothing to draw. Any
+            // dithering error diffused into the cell is dropped with it, and
+            // none is passed on: the picture's edge is a real boundary.
+            if !visible(i) {
+                cells.push(Cell {
+                    glyph: ' ',
+                    color: [0, 0, 0],
+                    shade: [0, 0, 0],
+                    alpha: 0,
+                });
+                continue;
+            }
             let value = levels[i];
             let idx = value.round().clamp(0.0, max_level) as usize;
             let glyph = RAMP[idx] as char;
@@ -623,9 +761,10 @@ fn build_grid(img: &DynamicImage, settings: &ConvertSettings) -> Conversion {
                     glyph,
                     color,
                     shade: color,
+                    alpha: alphas[i],
                 },
-                Some(sub) => {
-                    let split = two_tone_split(sub, x, y);
+                Some((sub, sub_alpha)) => {
+                    let split = two_tone_split(sub, sub_alpha.as_deref(), x, y);
                     let mean = split.mean_luminance.max(1.0);
                     let relative = |c: [u8; 3]| brightness * luminance(c) / mean;
                     let fg = tone(split.light, relative(split.light));
@@ -687,6 +826,7 @@ fn build_grid(img: &DynamicImage, settings: &ConvertSettings) -> Conversion {
                         glyph: best.glyph,
                         color: fg,
                         shade,
+                        alpha: alphas[i],
                     }
                 }
             };
@@ -757,7 +897,10 @@ fn cell_background(cell: &Cell, base: [u8; 3]) -> [u8; 3] {
 /// blended from `base` -- the resolved `--bg` color, the same one the grid's
 /// glyphs were picked against. Without it the terminal's own background
 /// shows through; terminals have no notion of opacity, so a flat or
-/// transparent backdrop is left to the terminal entirely.
+/// transparent backdrop is left to the terminal entirely. For the same
+/// reason, a cell the source leaves fully transparent is a plain space on
+/// the terminal's own background, while a partly covered one is drawn as
+/// usual.
 pub fn render_ansi(grid: &Grid, mono: bool, cell_bg: bool, base: [u8; 3]) -> String {
     let mut out = String::with_capacity((grid.width as usize + 1) * grid.height as usize);
     for y in 0..grid.height {
@@ -771,6 +914,15 @@ pub fn render_ansi(grid: &Grid, mono: bool, cell_bg: bool, base: [u8; 3]) -> Str
             let cell = &grid.cells[(y * grid.width + x) as usize];
             if mono {
                 out.push(cell.glyph);
+                continue;
+            }
+            if cell.alpha == 0 {
+                if last_fg.is_some() || last_bg.is_some() {
+                    out.push_str("\x1b[0m");
+                    last_fg = None;
+                    last_bg = None;
+                }
+                out.push(' ');
                 continue;
             }
             if cell_bg {
@@ -816,6 +968,10 @@ const AUTO_BG_TINT: f64 = 0.25;
 /// those colors (rather than two-tone mode's lighter glyph tones) so the
 /// backdrop doesn't shift between modes.
 fn average_background(colors: &[[u8; 3]]) -> [u8; 3] {
+    // Nothing to average: a source that's transparent all over.
+    if colors.is_empty() {
+        return [0, 0, 0];
+    }
     let n = colors.len() as f64;
     let (mut r, mut g, mut b) = (0f64, 0f64, 0f64);
     for color in colors {
@@ -876,6 +1032,26 @@ fn fill_cell<P: Pixel>(
     }
 }
 
+/// Scales the opacity of every pixel in each cell by that cell's
+/// `Cell::alpha`, so a transparent source stays transparent in the export.
+fn apply_cell_alpha(canvas: &mut RgbaImage, grid: &Grid, cell: CellPixels) {
+    let (width, height) = (cell.width(), cell.height());
+    for y in 0..grid.height {
+        for x in 0..grid.width {
+            let alpha = grid.cells[(y * grid.width + x) as usize].alpha as u32;
+            if alpha == 255 {
+                continue;
+            }
+            for py in y * height..(y + 1) * height {
+                for px in x * width..(x + 1) * width {
+                    let pixel = canvas.get_pixel_mut(px, py);
+                    pixel.0[3] = ((pixel.0[3] as u32 * alpha + 127) / 255) as u8;
+                }
+            }
+        }
+    }
+}
+
 /// `render_raster` at the default 10x20 cell.
 pub fn render_image(grid: &Grid, mono: bool, bg: Background, cell_bg: bool) -> DynamicImage {
     render_raster(grid, mono, bg, cell_bg, CellPixels::default())
@@ -899,6 +1075,11 @@ pub fn render_image(grid: &Grid, mono: bool, bg: Background, cell_bg: bool) -> D
 // cover `bg`'s color entirely, but a translucent `bg`'s alpha carries over
 // to them so a semi-transparent export stays semi-transparent.
 //
+// Where the source itself is transparent, so is the export: each cell's
+// pixels -- backdrop, cell background and glyph together -- are scaled by
+// its `Cell::alpha`. A grid with any such cell renders with an alpha
+// channel even over an opaque `bg`.
+//
 // `cell` sets the pixel size of each glyph. A smaller cell with
 // proportionally more grid columns gives a denser picture at the same size.
 pub fn render_raster(
@@ -913,6 +1094,15 @@ pub fn render_raster(
     let scale = PxScale::from(cell.height() as f32);
     let img_width = grid.width * cell.width();
     let img_height = grid.height * cell.height();
+
+    // An opaque backdrop behind a partly transparent grid still needs
+    // somewhere to put that transparency.
+    let bg = match bg {
+        Background::Opaque(color) if !grid.is_opaque() => {
+            Background::Translucent { color, alpha: 255 }
+        }
+        bg => bg,
+    };
 
     match bg {
         Background::Opaque(color) => {
@@ -977,6 +1167,7 @@ pub fn render_raster(
                     );
                 }
             }
+            apply_cell_alpha(&mut canvas, grid, cell);
             DynamicImage::ImageRgba8(canvas)
         }
     }
@@ -1130,6 +1321,7 @@ mod tests {
             glyph: '#',
             color: [255, 255, 255],
             shade,
+            alpha: 255,
         };
         assert_eq!(
             cell_background(&cell([40, 50, 60]), [40, 50, 60]),
@@ -1346,6 +1538,7 @@ mod tests {
             glyph: '#',
             color: [255, 0, 0],
             shade: [80, 0, 0],
+            alpha: 255,
         }
     }
 
@@ -1384,6 +1577,7 @@ mod tests {
                     glyph: '.',
                     color: [0, 0, 255],
                     shade: [0, 0, 255],
+                    alpha: 255,
                 },
                 red_hash(),
                 red_hash(),
@@ -1403,6 +1597,7 @@ mod tests {
             glyph: ' ',
             color: [255, 255, 255],
             shade: [200, 0, 0],
+            alpha: 255,
         }
     }
 
@@ -1535,5 +1730,106 @@ mod tests {
             cells: vec![red_hash()],
         };
         render_ansi(&grid, false, false, [0, 0, 0]);
+    }
+
+    // --- transparent sources ---
+
+    /// A colorful disc in the middle of a transparent square, whose
+    /// transparent pixels hide `hidden`.
+    fn disc(size: u32, hidden: [u8; 3]) -> DynamicImage {
+        let center = size as f64 / 2.0;
+        DynamicImage::ImageRgba8(RgbaImage::from_fn(size, size, |x, y| {
+            let (dx, dy) = (x as f64 + 0.5 - center, y as f64 + 0.5 - center);
+            if (dx * dx + dy * dy).sqrt() < size as f64 * 0.3 {
+                Rgba([(x * 255 / size) as u8, 90, (y * 255 / size) as u8, 255])
+            } else {
+                Rgba([hidden[0], hidden[1], hidden[2], 0])
+            }
+        }))
+    }
+
+    #[test]
+    fn an_opaque_alpha_channel_changes_nothing() {
+        let rgb = colorful(96, 64);
+        let rgba = DynamicImage::ImageRgba8(rgb.to_rgba8());
+        for cell_bg in [false, true] {
+            assert_eq!(
+                build_grid(&rgb, &settings(32, cell_bg)),
+                build_grid(&rgba, &settings(32, cell_bg))
+            );
+        }
+    }
+
+    #[test]
+    fn a_cut_out_leaves_its_surroundings_empty() {
+        for cell_bg in [false, true] {
+            let grid = build_grid(&disc(96, [0, 0, 0]), &settings(32, cell_bg)).grid;
+            let at = |x: u32, y: u32| &grid.cells[(y * grid.width + x) as usize];
+            let corner = at(0, 0);
+            assert_eq!((corner.glyph, corner.alpha), (' ', 0));
+            let middle = at(grid.width / 2, grid.height / 2);
+            assert_eq!(middle.alpha, 255);
+            assert_ne!(middle.glyph, ' ');
+            assert!(!grid.is_opaque());
+        }
+    }
+
+    #[test]
+    fn whatever_hides_under_transparency_stays_hidden() {
+        for cell_bg in [false, true] {
+            assert_eq!(
+                build_grid(&disc(96, [0, 0, 0]), &settings(32, cell_bg)),
+                build_grid(&disc(96, [0, 255, 0]), &settings(32, cell_bg)),
+            );
+        }
+    }
+
+    #[test]
+    fn a_fully_transparent_source_is_all_blank() {
+        let empty = DynamicImage::ImageRgba8(RgbaImage::from_pixel(40, 40, Rgba([9, 9, 9, 0])));
+        let conversion = build_grid(&empty, &settings(32, true));
+        assert!(
+            conversion
+                .grid
+                .cells
+                .iter()
+                .all(|c| c.glyph == ' ' && c.alpha == 0)
+        );
+        assert_eq!(conversion.auto_bg, [0, 0, 0]);
+    }
+
+    #[test]
+    fn a_raster_keeps_the_sources_transparency_over_an_opaque_backdrop() {
+        let grid = build_grid(&disc(96, [0, 0, 0]), &settings(32, true)).grid;
+        let cell = CellPixels::default();
+        let image =
+            render_raster(&grid, false, Background::Opaque([20, 20, 20]), true, cell).to_rgba8();
+        let alpha_at = |x: u32, y: u32| {
+            image
+                .get_pixel(x * cell.width() + cell.width() / 2, y * cell.height() + 1)
+                .0[3]
+        };
+        assert_eq!(alpha_at(0, 0), 0);
+        assert_eq!(alpha_at(grid.width / 2, grid.height / 2), 255);
+    }
+
+    #[test]
+    fn ansi_leaves_a_transparent_cell_to_the_terminal() {
+        let empty = || Cell {
+            glyph: ' ',
+            color: [0, 0, 0],
+            shade: [0, 0, 0],
+            alpha: 0,
+        };
+        let grid = Grid {
+            width: 3,
+            height: 1,
+            cells: vec![red_hash(), empty(), red_hash()],
+        };
+        let out = render_ansi(&grid, false, false, [0, 0, 0]);
+        assert_eq!(
+            out,
+            "\x1b[38;2;255;0;0m#\x1b[0m \x1b[38;2;255;0;0m#\x1b[0m\n"
+        );
     }
 }

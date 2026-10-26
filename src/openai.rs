@@ -27,6 +27,9 @@ pub struct Options<'a> {
     /// More images sent along after `reference`, for the prompt to refer to
     /// (a palette or style to match, say). Only sent with a `reference`.
     pub extra_references: &'a [&'a [u8]],
+    /// Ask for a transparent background: the subject alone, cut out, as a
+    /// PNG with an alpha channel.
+    pub transparent: bool,
 }
 
 impl Default for Options<'_> {
@@ -41,6 +44,7 @@ impl Default for Options<'_> {
             count: 1,
             reference: None,
             extra_references: &[],
+            transparent: false,
         }
     }
 }
@@ -63,6 +67,9 @@ fn edit_fields(prompt: &str, options: &Options, n: u32) -> Vec<(&'static str, St
     ];
     if supports_input_fidelity(options.model) {
         fields.push(("input_fidelity", "high".to_string()));
+    }
+    if options.transparent {
+        fields.push(("background", "transparent".to_string()));
     }
     fields
 }
@@ -87,6 +94,8 @@ struct ImageRequest<'a> {
     n: u32,
     size: &'a str,
     quality: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    background: Option<&'a str>,
 }
 
 #[derive(Deserialize)]
@@ -242,6 +251,7 @@ fn request_batch(
             n,
             size: options.size,
             quality: options.quality,
+            background: options.transparent.then_some("transparent"),
         }),
     };
 
@@ -342,6 +352,7 @@ mod tests {
             n: 3,
             size: "1024x1536",
             quality: "low",
+            background: None,
         })
         .unwrap();
         assert_eq!(
@@ -354,6 +365,28 @@ mod tests {
                 "quality": "low",
             })
         );
+    }
+
+    #[test]
+    fn transparent_requests_ask_for_a_transparent_background() {
+        let body = serde_json::to_value(ImageRequest {
+            model: "gpt-image-1",
+            prompt: "a dragon",
+            n: 1,
+            size: "1024x1024",
+            quality: "low",
+            background: Some("transparent"),
+        })
+        .unwrap();
+        assert_eq!(body["background"], "transparent");
+
+        let options = Options {
+            reference: Some(b"png"),
+            transparent: true,
+            ..Options::default()
+        };
+        let fields = edit_fields("cut it out", &options, 1);
+        assert!(fields.contains(&("background", "transparent".to_string())));
     }
 
     #[test]
@@ -373,6 +406,7 @@ mod tests {
             count: 1,
             reference: Some(b"png"),
             extra_references: &[],
+            transparent: false,
         };
         let fields = edit_fields("paint it", &options, 2);
         let get = |k| {
@@ -387,6 +421,7 @@ mod tests {
         assert_eq!(get("size"), Some("1536x768"));
         assert_eq!(get("quality"), Some("medium"));
         assert_eq!(get("input_fidelity"), None);
+        assert_eq!(get("background"), None);
 
         let old = Options {
             model: "gpt-image-1",
